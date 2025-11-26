@@ -50,7 +50,7 @@ def main():
         {"file": "Clean_Data.py",                   "enabled": True},
         {"file": "RAPM_Calculator.py",              "enabled": True},
         {"file": "GAR_WAR_SPAR_Calculator.py",      "enabled": True},
-        {"file": "WAR$Conversion.py",               "enabled": True},
+        {"file": "WAR_value_conversion",            "enabled": True},
         {"file": "age_curve.py",                    "enabled": True},
         {"file": "contract_prediction.py",          "enabled": True},
         {"file": "dashboard.py",                    "enabled": True},
