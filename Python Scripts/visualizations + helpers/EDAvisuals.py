@@ -10,18 +10,18 @@ from pathlib import Path
 # Config
 data_root = Path(__file__).resolve().parents[2]
 season = "2024-2025"
-contracts_path = data_root / "NHL_CONTRACTS_MASTER.csv"
+contracts_path = data_root / "Data" / "Clean Data" / "NHL_CONTRACTS_MASTER.csv"
 out_dir = Path(__file__).resolve().parent / "figs"
 out_dir.mkdir(parents=True, exist_ok=True)
-nst_es_path = data_root / season / f"NST_player_master_ES_{season}.csv"
-stints_path = data_root / season / f"stints_{season}.csv"
+nst_es_path = data_root / "Data" / "Clean Data" / season / f"NST_player_master_ES_{season}.csv"
+stints_path = data_root / "Data" / "Clean Data" / season / f"stints_{season}.csv"
 
-title_cap_history = "Distribution of Average Annual Contract Value (AAV) in terms of Cap Hit (%)"
+title_cap_history = "Figure 1: Distribution of Average Annual Contract Value (AAV) in terms of Cap Hit (%)"
 title_cap_history_pos = "Contract Cap Hit (%) by Position (Goalies excluded)"
-title_term_vs_cap = "Term vs Cap Hit (%): Mean + Median with Min–Max Band"
+title_term_vs_cap = "Figure 2: Term vs Cap Hit (%): Mean + Median with Min–Max Band"
 title_stint_distribution = "Distribution of Stint Lengths (1 Second Bins)"
 title_percent_xg_stint = "Percentage Share of Stints with xGF"
-title_top_correlated_pairs = "Top Correlated Feature Pairs in NST Skater Data"
+title_top_correlated_pairs = "Figure 3: Top Correlated Feature Pairs in NST Skater Data"
 
 # Helpers
 def savefig(path):

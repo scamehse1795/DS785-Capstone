@@ -101,7 +101,7 @@ def fig_term_mae_vs_baseline():
     plt.xticks(x, [str(t) for t in x])
     plt.xlabel("Term (years)")
     plt.ylabel("MAE (cap % points)")
-    plt.title("Term MAE - Model vs Baseline (2025–26)")
+    plt.title("Figure 4: Term MAE - Model vs Baseline (2025–26)")
     plt.legend()
     plt.grid(True, axis="y", alpha=0.25)
     outp = out_dir / "term_mae_vs_baseline_2025_26.png"
