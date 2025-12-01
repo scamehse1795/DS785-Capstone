@@ -11,3 +11,27 @@ Scripts within the "Python Scripts" folder should be run in the following order:
 "dashboard.py"  
   
 A cached version of the run is stored within the repository.
+
+You do not need to specify any command line arguments when running, and the pathing for files should hold as long as the file structure remains as is.  
+Here is a rough ASCII layout of the project files:  
+  
+Root/  
+├─ Chrome/  
+│  ├─ chrome-win64/  
+│  ├─ chromedriver-win64/  
+├─ Data/  
+│  ├─ Clean Data/  
+│  │  ├─ (Seasonal Subfolders)/  
+│  │  ├─ <Cleaned League and Age Curve Files>  
+│  ├─ Raw Data/  
+│  │  ├─ HockeyReference/  
+│  │  ├─ MoneyPuck/  
+│  │  │  ├─ Team Level/  
+│  │  ├─ NaturalStatTrick/  
+├─ Python Scripts/  
+│  ├─ <python script files>  
+│  ├─ visualizations + helpers/  
+│  │  ├─ <visualization scripts>  
+├─ README.md  
+├─ .gitattributes  
+
