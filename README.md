@@ -11,3 +11,6 @@ Scripts within the "Python Scripts" folder should be run in the following order:
 "dashboard.py"  
   
 A cached version of the run is stored within the repository.
+
+You do not need to specify any command line arguments when running, and the pathing for files should hold as long as the file structure remains as is.
+Here is a 
