@@ -106,7 +106,7 @@ def piecewise_curve(age, p):
 
     return max(0.0, min(1.05, float(y)))
 
-def build_source_curves(age_list, params_for_source):
+def build_individual_curves(age_list, params_for_source):
     out = {}
     for pos in ["F", "D"]:
         spec = params_for_source[pos]
@@ -119,7 +119,7 @@ def build_source_curves(age_list, params_for_source):
 def build_all_curves(ages, params):
     curves = {}
     for src in ["Dom", "Tulsky", "EvolvingWild"]:
-        curves[src] = build_source_curves(ages, params[src])
+        curves[src] = build_individual_curves(ages, params[src])
     return curves
 
 def build_age_curve_table(ages, curves):

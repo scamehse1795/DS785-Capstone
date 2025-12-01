@@ -430,8 +430,7 @@ def build_training_master(contracts_all, gar_bank):
     contracts_all["cap_era"] = contracts_all["Start_Year"].apply(cap_era_label_from_year)
     contracts_all = contracts_all.loc[contracts_all["level_clean"] != "ELC"].copy()
     rows = []
-    last_demo = (contracts_all.sort_values(["playerId", "Start_Year"]).groupby("playerId")
-        .tail(1)[["playerId", "Shot", "Weight_lb", "Height_in", "Signing_Age"]]).set_index("playerId")
+    last_demo = (contracts_all.sort_values(["playerId", "Start_Year"]).groupby("playerId").tail(1)[["playerId", "Shot", "Weight_lb", "Height_in", "Signing_Age"]]).set_index("playerId")
 
     for row in contracts_all.itertuples(index=False):
         pid, syear = row.playerId, row.Start_Year
@@ -439,12 +438,10 @@ def build_training_master(contracts_all, gar_bank):
         prev = gar_bank.loc[(gar_bank["playerId"]==pid) & (gar_bank["Stats_Year"]==(int(syear)-1))]
         if len(prev)==0: continue
         p2 = prev.sort_values("TOI_all", ascending=False).head(1).iloc[0]
-
         shot_val = row.Shot
         wt_val = row.Weight_lb
         ht_val = row.Height_in
         sa_val = row.Signing_Age
-
         if pid in last_demo.index:
             dd = last_demo.loc[pid]
             if pd.isna(wt_val):
@@ -479,8 +476,7 @@ def build_training_master(contracts_all, gar_bank):
 
     tm = pd.DataFrame(rows)
     if len(tm):
-        tm = (tm.sort_values(["playerId","Start_Year","TOI_all_value"], ascending=[True, True, False])
-                .drop_duplicates(subset=["playerId","Start_Year"], keep="first").copy())
+        tm = (tm.sort_values(["playerId","Start_Year","TOI_all_value"], ascending=[True, True, False]).drop_duplicates(subset=["playerId","Start_Year"], keep="first").copy())
     return tm
 
 def attach_gar_projections(df_rows, gar_bank, ratio_tables, horizon=9):
@@ -689,7 +685,6 @@ def build_candidates(train_df, row, k):
 def compute_knn_and_terms(train_df, target_df, block_weights, k_neighbors, distance_scale, kernel_power, kmin_per_term,
                           term_models, term_meta, eh_blend_base, eh_blend_strong, eh_blend_cap):
     valid_terms = list(range(1, 9))
-
     tr, tg = add_context_onehots(train_df, target_df)
     block_defs = get_block_defs(pd.concat([tr, tg], ignore_index=True, sort=False))
     scalers, inv_covs, used_cols = fit_block_scalers_and_covs(tr, block_defs)
@@ -750,13 +745,17 @@ def compute_knn_and_terms(train_df, target_df, block_weights, k_neighbors, dista
             n_t = int(mask_t.sum())
             n_term[t] = n_t
             if n_t == 0:
-                cap_knn[t], iqr_knn[t], eff_n_term[t] = np.nan, np.nan, np.nan
+                cap_knn[t] = np.nan
+                iqr_knn[t] = np.nan
+                eff_n_term[t] = np.nan
             else:
                 sub = neigh.loc[mask_t]
                 vals = pd.to_numeric(sub["Start_Yr_Cap_Pct"], errors="coerce")
                 wts = sub["knn_weight"].to_numpy()
                 if vals.notna().sum() == 0:
-                    cap_knn[t], iqr_knn[t], eff_n_term[t] = np.nan, np.nan, np.nan
+                    cap_knn[t] = np.nan
+                    iqr_knn[t] = np.nan
+                    eff_n_term[t] = np.nan
                 else:
                     cap_knn[t] = float(np.nansum(vals.to_numpy()*wts) / max(np.nansum(wts), 1e-12))
                     vclean = vals.dropna().to_numpy()
@@ -1024,7 +1023,6 @@ def main():
 
     train_df = training_master.loc[training_master["Start_Year"] < target_year].copy()
     expiring_df = training_master.loc[training_master["Start_Year"] == target_year].copy()
-
     gar_prev = gar_bank.loc[gar_bank["Stats_Year"] == target_year-1].copy()
     base = (gar_prev.sort_values(["playerId","TOI_all"], ascending=[True, False]).drop_duplicates(subset=["playerId"]).copy())
     base["PlayerName"] = base["Player"]
@@ -1094,7 +1092,6 @@ def main():
     dm_opt = distance_scale
     uq_opt = kernel_power
     eh_alpha_opt, eh_b_opt, eh_s_opt, eh_cap_opt = evolv_hockey_blend_alpha, evolv_hockey_blend_base, evolv_hockey_blend_strong, evolv_hockey_blend_cap
-
     term_models, term_meta = fit_term_models(train_df, list(range(1,9)), alpha=eh_alpha_opt)
     pred_df, comps_df = compute_knn_and_terms(train_df, target_df, W_opt, K_opt, dm_opt, uq_opt, k_min_per_term,
                                               term_models, term_meta, eh_blend_base=eh_b_opt, eh_blend_strong=eh_s_opt, eh_blend_cap=eh_cap_opt)
@@ -1103,7 +1100,6 @@ def main():
     eval_joined, by_term = evaluate_per_true_term(pred_df, base_targ)
     write_results(out_dir, season_str, expiring_df, whatif_df, pred_df, comps_df)
     write_model_diagnostics(out_dir, season_str, by_term)
-
     err_br = error_breakdowns(eval_joined)
     err_br_file = out_dir / f"model_error_breakdowns_{season_str}.csv"
     err_br.to_csv(err_br_file, index=False)

@@ -34,6 +34,10 @@ chrome_binary = project_root / "Chrome" / "chrome-win64" / "chrome.exe"
 chromedriver_path = project_root / "Chrome" / "chromedriver-win64" / "chromedriver.exe"
 master_out = project_root / "Data" / "Clean Data" / "NHL_CONTRACTS_MASTER.csv"
 
+capwages_base_url = "https://capwages.com/signings"
+cw_thead_th = "//main//table//thead//th | //main//table//thead//tr//th"
+cw_tbody_rows = "//main//table//tbody/tr"
+
 start_year = 2015
 end_year = 2025
 
@@ -171,7 +175,6 @@ def parse_position_letter(pos_text):
         return "R"
     if "C" in p:
         return "C"
-
     if p == "L":
         return "L"
     if p == "R":
@@ -241,10 +244,6 @@ def js_click(driver, el):
         el.click()
 
 # CapWages Scraping
-capwages_base_url = "https://capwages.com/signings"
-cw_thead_th = "//main//table//thead//th | //main//table//thead//tr//th"
-cw_tbody_rows = "//main//table//tbody/tr"
-
 def capwages_open(driver):
     time.sleep(1.25)
     driver.get(capwages_base_url)

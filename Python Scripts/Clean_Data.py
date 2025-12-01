@@ -142,11 +142,11 @@ full_name_replacement_list = {
     }
 
 # Helpers
-def repair_mojibake(x):
+def repair_mojibake(name):
     try:
-        return str(x).encode("latin1").decode("utf-8")
+        return str(name).encode("latin1").decode("utf-8")
     except Exception:
-        return str(x)
+        return str(name)
 
 def strip_accents(x):
     s = unicodedata.normalize("NFKD", str(x))
@@ -495,18 +495,18 @@ def build_situation_master(paths, season, pref, label, name_to_id):
     on_rates = try_read_csv(paths.get(f"ONICE_{pref}_RATES",""))
     ind_rates = try_read_csv(paths.get(f"INDIV_{pref}_RATES",""))
 
-    a = aggregate_counts(on_counts, label)
-    b = aggregate_relative(on_rel, a, label)
-    c = aggregate_individual(ind_cnt, label)
+    agg_counts = aggregate_counts(on_counts, label)
+    agg_relative = aggregate_relative(on_rel, agg_counts, label)
+    agg_individual = aggregate_individual(ind_cnt, label)
 
-    m = a.copy()
-    if b is not None:
-        rel_cols = [x for x in b.columns if x not in ["Player","Player_canon","Position","Situation"]]
-        m = m.merge(b[["Player","Player_canon","Position"] + rel_cols],
+    m = agg_counts.copy()
+    if agg_relative is not None:
+        rel_cols = [x for x in agg_relative.columns if x not in ["Player","Player_canon","Position","Situation"]]
+        m = m.merge(agg_relative[["Player","Player_canon","Position"] + rel_cols],
                     on=["Player","Player_canon","Position"], how="left")
-    if c is not None:
-        keep = [x for x in c.columns if x != "Situation"]
-        m = m.merge(c[keep], on=["Player","Player_canon","Position"], how="left", suffixes=("","_ind"))
+    if agg_individual is not None:
+        keep = [x for x in agg_individual.columns if x != "Situation"]
+        m = m.merge(agg_individual[keep], on=["Player","Player_canon","Position"], how="left", suffixes=("","_ind"))
 
     if on_rates is not None:
         join_cols = ["Player","Player_canon","Position"]
