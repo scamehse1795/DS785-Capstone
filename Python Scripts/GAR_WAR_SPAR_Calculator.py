@@ -41,7 +41,8 @@ min_toi_for_base = 100.0
 trim_q_def_low = 0.10
 trim_q_off_high = 0.05
 
-k_shrink = {"EV": 300.0, "PP": 120.0, "PK": 1200.0}
+# Shrinkage for low TOI players
+k_shrink = {"EV": 300.0, "PP": 120.0, "PK": 120.0}
 k_shrink_es_by_pos = {"F": 300.0, "D": 260.0}
 lambda_decay = 0.55
 usage_beta_def_zone = 0.10
@@ -89,7 +90,7 @@ def pos_bucket(pos_text):
     if not isinstance(pos_text, str):
         return "F"
     p = pos_text.upper()
-    if ("LD" in p) or ("RD" in p) or (p == "D") or (" D" in p) or p.startswith("D"):
+    if ("LD" in p) or ("RD" in p) or (p == "D") or p.startswith("D"):
         return "D"
     if any(x in p for x in ["C","LW","RW","F"]):
         return "F"
@@ -144,6 +145,7 @@ def load_nst(root, situation, season):
 
     return df
 
+# Compute TOI-weighted average of rate stats
 def shrink_weight_ev_by_pos(toi_min, pos_series):
     toi = np.maximum(0.0, np.asarray(toi_min, dtype=float))
     pos = pos_series.astype(str).fillna("F")
@@ -224,6 +226,7 @@ def league_replacement_by_pos(nst_ev, nst_pp, nst_pk):
         "repl_GA60_PK_pos": repl_GA60_PK_pos,
         }
 
+# Players with more defensive-zone starts get a small boost to their defensive GAR (they are expected to face tougher situations), heavy offensive-zone deployments are scaled down slightly
 def usage_factor_from_ozpct(series_ozpct):
     oz = to_float(series_ozpct, 50.0)
     dz_share = 100.0 - oz
@@ -231,7 +234,7 @@ def usage_factor_from_ozpct(series_ozpct):
     fac = 1.0 + usage_beta_def_zone * (dz_centered / 25.0)
     return np.clip(fac, usage_clip_min, usage_clip_max)
 
-# Percentile Buckets
+# Percentile Buckets by position and TOI role
 def add_percentiles_pos_role(m):
     out = m.copy()
     for c in ["GAR_ES_off","GAR_ES_def","GAR_PP","GAR_PK","GAR_off","GAR_def","GAR_total",
@@ -260,10 +263,9 @@ def add_percentiles_pos_role(m):
     rank_into("GAR_off", "pct_off_pos_role", mask_offd)
     rank_into("GAR_def", "pct_def_pos_role", mask_offd)
     rank_into("GAR_total", "pct_total_pos_role", mask_offd)
-
     return out
 
-# Priors
+# Priors shrinking (even strength uses EV, special teams uses ST function)
 def compute_ev_shrunk_for_one_season(root, season):
     if not season:
         return None
@@ -333,10 +335,12 @@ def compute_st_priors_for_one_season(root, season, which):
 
 # Builder
 def build_one_season(y):
+    # Convert start year into season label
     season = season_label(y)
     out_dir = data_root / season
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Read goal conversion factors for this season
     goals_tab = pd.read_csv(data_root / goal_table_file)
     goals_tab["Season"] = goals_tab["Season"].astype(str).str.strip()
     row = goals_tab[goals_tab["Season"] == season]
@@ -345,25 +349,31 @@ def build_one_season(y):
     goals_per_win = float(row.iloc[0]["GOALS_TO_WIN"])
     goals_per_standing_point = float(row.iloc[0]["GOALS_TO_STANDING_POINT"])
 
+    # Load NST per-player data for EV, PP, and PK
     nst_ev = load_nst(data_root, "EV", season)
     nst_pp = load_nst(data_root, "PP", season)
     nst_pk = load_nst(data_root, "PK", season)
 
+    # Compute league-wide replacement baselines for this season
     repl_pos = league_replacement_by_pos(nst_ev, nst_pp, nst_pk)
     ev_df = nst_ev.copy()
     ev_df["playerId"] = ev_df["playerId"].astype("Int64")
+    
+    # Shrink current-season rates toward replacement, with strength depending on TOI and position
     w_ev = shrink_weight_ev_by_pos(ev_df["TOI"], ev_df["PosBucket"])
     pos_vec = ev_df["PosBucket"].fillna("F").astype(str).values
     repl_xgf_pos_vec = np.array([repl_pos["repl_xGF60_ES_pos"].get(p, np.nan) for p in pos_vec], dtype=float)
     repl_xga_pos_vec = np.array([repl_pos["repl_xGA60_ES_pos"].get(p, np.nan) for p in pos_vec], dtype=float)
-
     xgf_raw = pd.to_numeric(ev_df["xGF_per60"], errors="coerce").to_numpy()
     xga_raw = pd.to_numeric(ev_df["xGA_per60"], errors="coerce").to_numpy()
+    
+    # If a player is missing xGF/xGA rates, fall back to replacement-level values
     xgf_raw = np.where(np.isnan(xgf_raw), repl_xgf_pos_vec, xgf_raw)
     xga_raw = np.where(np.isnan(xga_raw), repl_xga_pos_vec, xga_raw)
     ev_df["ES_xGF60_shr"] = w_ev * xgf_raw + (1.0 - w_ev) * repl_xgf_pos_vec
     ev_df["ES_xGA60_shr"] = w_ev * xga_raw + (1.0 - w_ev) * repl_xga_pos_vec
 
+    # Build per-season priors (up to 2 years)
     season_prev1 = season_label(y-1) if y-1 >= start_year else None
     season_prev2 = season_label(y-2) if y-2 >= start_year else None
     ev_prev1 = compute_ev_shrunk_for_one_season(data_root, season_prev1) if season_prev1 else None
@@ -377,6 +387,7 @@ def build_one_season(y):
                 "ES_xGF60_shr","ES_xGA60_shr","Off. Zone Start Pct"]].copy()
     ev_table["playerId"] = ev_table["playerId"].astype("Int64")
 
+    # Merge in priors if available
     if ev_prev1 is not None:
         ev_table = ev_table.merge(
             ev_prev1.rename(columns={
@@ -401,11 +412,15 @@ def build_one_season(y):
         ev_table["ES_xGA60_shr_prev2"] = np.nan
         ev_table["TOI_EV_prev2"] = 0.0
 
+    # Compute multi-year weights (players with more games get more weight on the current season)
+    # Shrink based on games played and TOI; higher for both adds weight to priors/current season
     gp_current = to_float(ev_table.get("GP", 0.0), 0.0).to_numpy()
     toi_current = to_float(ev_table.get("TOI", 0.0), 0.0).to_numpy()
     toi_per_game_ev = np.where(gp_current > 0.0, toi_current / gp_current, 0.0)
     gp_gate = float(pct_gp_gate)
     gp_fac = np.where(gp_current + gp_gate > 0.0, gp_current / (gp_current + gp_gate), 0.0)
+    
+    # Position-specific "minutes per game" scale for shrinkage of even strength rates
     pos_for_k = ev_table["PosBucket"].astype(str).fillna("F").values
     k_ev_forward = k_shrink_es_by_pos.get("F", k_shrink["EV"]) / gp_gate
     k_ev_defense = k_shrink_es_by_pos.get("D", k_shrink["EV"]) / gp_gate
@@ -413,16 +428,22 @@ def build_one_season(y):
     ev_current_weight = np.where(k_ev_by_row > 0.0, (toi_per_game_ev / k_ev_by_row) * gp_fac, 0.0)
     ev_current_weight = np.clip(ev_current_weight, 0.0, None)
 
+    # Prior-season weights (TOI-based) with geometric decay for the older season (This protects injured players from being nuked by priors and stabilizes results a bit)
     k_prev_ev = 240.0
     toi_ev_prev1 = to_float(ev_table.get("TOI_EV_prev1"), 0.0).to_numpy()
     toi_ev_prev2 = to_float(ev_table.get("TOI_EV_prev2"), 0.0).to_numpy()
     w_curr = ev_current_weight
     w_prev1 = np.where(toi_ev_prev1 > 0, toi_ev_prev1 / (toi_ev_prev1 + k_prev_ev), 0.0)
     w_prev2 = lambda_decay * np.where(toi_ev_prev2 > 0, toi_ev_prev2 / (toi_ev_prev2 + k_prev_ev), 0.0)
+    
+    # Normalize weights
     denom = w_curr + w_prev1 + w_prev2
     denom = np.where(denom > 0.0, denom, 1.0)
-    weight_curr, weight_prev1, weight_prev2 = w_curr/denom, w_prev1/denom, w_prev2/denom
+    weight_curr = w_curr/denom
+    weight_prev1 = w_prev1/denom
+    weight_prev2 = w_prev2/denom
 
+    # Build multi-year blended even strength xGF/60 and xGA/60 rates
     curr_xgf = pd.to_numeric(ev_table["ES_xGF60_shr"], errors="coerce").to_numpy()
     curr_xga = pd.to_numeric(ev_table["ES_xGA60_shr"], errors="coerce").to_numpy()
     curr_xgf = np.where(np.isnan(curr_xgf), repl_xgf_pos_vec, curr_xgf)
@@ -436,20 +457,28 @@ def build_one_season(y):
     p2_xgf = np.where(np.isnan(p2_xgf), repl_xgf_pos_vec, p2_xgf)
     p2_xga = np.where(np.isnan(p2_xga), repl_xga_pos_vec, p2_xga)
 
+    # Final multi-year blended even strength rates for offense and defense
     ev_table["ES_xGF60_blend"] = weight_curr*curr_xgf + weight_prev1*p1_xgf + weight_prev2*p2_xgf
     ev_table["ES_xGA60_blend"] = weight_curr*curr_xga + weight_prev1*p1_xga + weight_prev2*p2_xga
     ev_table = ev_table.rename(columns={"TOI":"TOI_EV"})
+    
+    # Build row-wise replacement baselines by position (F/D)
     repl_xgf_pos_map = {"F": repl_pos["repl_xGF60_ES_pos"]["F"], "D": repl_pos["repl_xGF60_ES_pos"]["D"]}
     repl_xga_pos_map = {"F": repl_pos["repl_xGA60_ES_pos"]["F"], "D": repl_pos["repl_xGA60_ES_pos"]["D"]}
     repl_xgf_byrow = np.array([repl_xgf_pos_map.get(p, np.nan) for p in ev_table["PosBucket"].astype(str)], dtype=float)
     repl_xga_byrow = np.array([repl_xga_pos_map.get(p, np.nan) for p in ev_table["PosBucket"].astype(str)], dtype=float)
+    
+    # Convert rates into GAR (offense + defense) with an adjustment for defensive-zone deployment (defense only)
     ev_table["GAR_ES_off"] = (ev_table["ES_xGF60_blend"] - repl_xgf_byrow) * (ev_table["TOI_EV"] / 60.0)
     usage_fac = usage_factor_from_ozpct(ev_table["Off. Zone Start Pct"])
     delta_def_per60 = (repl_xga_byrow - ev_table["ES_xGA60_blend"])
     ev_table["GAR_ES_def"] = (delta_def_per60 * usage_fac) * (ev_table["TOI_EV"] / 60.0)
 
+    # Power Play GAR Calculation
     pp_df = nst_pp.copy()
     pp_df["playerId"] = pp_df["playerId"].astype("Int64")
+    
+    # Shrink PP GF/60 rates toward replacement based on PP TOI
     w_pp = shrink_weight(pp_df["TOI"], k_shrink["PP"])
     pos_pp = pp_df["PosBucket"].fillna("F").astype(str).values
     repl_gf_pp_vec = np.array([repl_pos["repl_GF60_PP_pos"].get(p, np.nan) for p in pos_pp], dtype=float)
@@ -458,6 +487,7 @@ def build_one_season(y):
     pp_df["PP_GF60_shr"] = w_pp * pp_gf_raw + (1.0 - w_pp) * repl_gf_pp_vec
     pp_table = pp_df[["playerId","Player","PosBucket","TeamStd_Primary","GP","TOI","PP_GF60_shr"]].rename(columns={"TOI":"TOI_PP"})
 
+    # PP priors if available
     if pp_prev1 is not None:
         pp_table = pp_table.merge(pp_prev1.rename(columns={"PP_rate_prev":"PP_GF60_prev1", "TOI_PP_prev":"TOI_PP_prev1"}), on="playerId", how="left")
     else:
@@ -469,6 +499,7 @@ def build_one_season(y):
         pp_table["PP_GF60_prev2"] = np.nan
         pp_table["TOI_PP_prev2"] = 0.0
 
+    # Build PP weights using PP TOI and decay
     k_prev_pp = 120.0
     toi_pp_prev1 = to_float(pp_table.get("TOI_PP_prev1"), 0.0).to_numpy()
     toi_pp_prev2 = to_float(pp_table.get("TOI_PP_prev2"), 0.0).to_numpy()
@@ -477,8 +508,11 @@ def build_one_season(y):
     pp_current_weight = shrink_weight(pp_table["TOI_PP"], k_shrink["PP"])
     denom_pp = pp_current_weight + w_pp_prev1 + w_pp_prev2
     denom_pp = np.where(denom_pp > 0, denom_pp, 1.0)
-    weight_pp_curr, weight_pp_prev1, weight_pp_prev2 = pp_current_weight/denom_pp, w_pp_prev1/denom_pp, w_pp_prev2/denom_pp
+    weight_pp_curr = pp_current_weight/denom_pp
+    weight_pp_prev1 = w_pp_prev1/denom_pp
+    weight_pp_prev2 = w_pp_prev2/denom_pp
 
+    # Position-specific replacement PP GF/60 and final blended PP GF/60
     repl_gf_pp_byrow = np.array([repl_pos["repl_GF60_PP_pos"].get(p, np.nan) for p in pp_table["PosBucket"].astype(str)], dtype=float)
     pp_cur = pd.to_numeric(pp_table["PP_GF60_shr"],  errors="coerce").fillna(pd.Series(repl_gf_pp_byrow, index=pp_table.index)).to_numpy()
     pp_p1 = pd.to_numeric(pp_table["PP_GF60_prev1"], errors="coerce").fillna(pd.Series(repl_gf_pp_byrow, index=pp_table.index)).to_numpy()
@@ -486,8 +520,11 @@ def build_one_season(y):
     pp_table["PP_GF60_blend"] = weight_pp_curr*pp_cur + weight_pp_prev1*pp_p1 + weight_pp_prev2*pp_p2
     pp_table["GAR_PP"] = (pp_table["PP_GF60_blend"] - repl_gf_pp_byrow) * (pp_table["TOI_PP"] / 60.0)
 
+    # Penalty Kill GAR Calculation
     pk_df = nst_pk.copy()
     pk_df["playerId"] = pk_df["playerId"].astype("Int64")
+    
+    # Shrink PK GA/60 toward replacement using PK TOI
     w_pk = shrink_weight(pk_df["TOI"], k_shrink["PK"])
     pos_pk = pk_df["PosBucket"].fillna("F").astype(str).values
     repl_ga_pk_vec = np.array([repl_pos["repl_GA60_PK_pos"].get(p, np.nan) for p in pos_pk], dtype=float)
@@ -496,6 +533,7 @@ def build_one_season(y):
     pk_df["PK_GA60_shr"] = w_pk * pk_ga_raw + (1.0 - w_pk) * repl_ga_pk_vec
     pk_table = pk_df[["playerId","Player","PosBucket","TeamStd_Primary","GP","TOI","PK_GA60_shr"]].rename(columns={"TOI":"TOI_PK"})
 
+    # PK priors if available
     if pk_prev1 is not None:
         pk_table = pk_table.merge(pk_prev1.rename(columns={"PK_rate_prev":"PK_GA60_prev1", "TOI_PK_prev":"TOI_PK_prev1"}), on="playerId", how="left")
     else:
@@ -507,7 +545,8 @@ def build_one_season(y):
         pk_table["PK_GA60_prev2"] = np.nan
         pk_table["TOI_PK_prev2"] = 0.0
 
-    k_prev_pk = 600.0
+    # Build PK weights using PK TOI and decay
+    k_prev_pk = 120.0
     toi_pk_prev1 = to_float(pk_table.get("TOI_PK_prev1"), 0.0).to_numpy()
     toi_pk_prev2 = to_float(pk_table.get("TOI_PK_prev2"), 0.0).to_numpy()
     w_pk_prev1 = np.where(toi_pk_prev1 > 0, toi_pk_prev1 / (toi_pk_prev1 + k_prev_pk), 0.0)
@@ -517,6 +556,7 @@ def build_one_season(y):
     denom_pk = np.where(denom_pk > 0, denom_pk, 1.0)
     weight_pk_curr, weight_pk_prev1, weight_pk_prev2 = pk_current_weight/denom_pk, w_pk_prev1/denom_pk, w_pk_prev2/denom_pk
 
+    # Position-specific replacement PK GA/60 and final blended PK GA/60
     repl_ga_pk_byrow = np.array([repl_pos["repl_GA60_PK_pos"].get(p, np.nan) for p in pk_table["PosBucket"].astype(str)], dtype=float)
     pk_cur = pd.to_numeric(pk_table["PK_GA60_shr"], errors="coerce").fillna(pd.Series(repl_ga_pk_byrow, index=pk_table.index)).to_numpy()
     pk_p1 = pd.to_numeric(pk_table["PK_GA60_prev1"], errors="coerce").fillna(pd.Series(repl_ga_pk_byrow, index=pk_table.index)).to_numpy()
@@ -524,6 +564,7 @@ def build_one_season(y):
     pk_table["PK_GA60_blend"] = weight_pk_curr*pk_cur + weight_pk_prev1*pk_p1 + weight_pk_prev2*pk_p2
     pk_table["GAR_PK"] = (repl_ga_pk_byrow - pk_table["PK_GA60_blend"]) * (pk_table["TOI_PK"] / 60.0)
 
+    # Merge EV, PP, and PK components into a unified player-season table
     key = ["playerId","Player","PosBucket","TeamStd_Primary","GP"]
     ev_cols = key + ["TOI_EV", "ES_xGF60_shr", "ES_xGA60_shr", "ES_xGF60_blend", "ES_xGA60_blend", "GAR_ES_off", "GAR_ES_def", "Off. Zone Start Pct",]
     pp_cols = key + ["TOI_PP", "PP_GF60_shr", "GAR_PP"]
@@ -534,16 +575,20 @@ def build_one_season(y):
     for c in ["TOI_EV","TOI_PP","TOI_PK","GAR_ES_off","GAR_ES_def","GAR_PP","GAR_PK"]:
         merged[c] = pd.to_numeric(merged.get(c, 0.0), errors="coerce").fillna(0.0)
 
+    # Aggregate across situations: total TOI and offensive/defensive components
     merged["TOI_all"] = merged["TOI_EV"] + merged["TOI_PP"] + merged["TOI_PK"]
     merged["GAR_off"] = merged["GAR_ES_off"] + merged["GAR_PP"]
     merged["GAR_def"] = merged["GAR_ES_def"] + merged["GAR_PK"]
     merged["GAR_total"]= merged["GAR_off"] + merged["GAR_def"]
+    
+    # Convert GAR to WAR and SPAR using season-specific conversion factors
     merged["WAR"] = np.where(goals_per_win > 0, merged["GAR_total"] / goals_per_win, np.nan)
     merged["SPAR"] = np.where(goals_per_standing_point > 0, merged["GAR_total"] / goals_per_standing_point, np.nan)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         merged["TOI_perG"] = np.where(merged["GP"] > 0.0, merged["TOI_all"] / merged["GP"], 0.0)
 
+    # Map TOI/gp into role label
     def choose_role_label(pos, toi_per_g):
         buckets = defender_role_buckets if pos == "D" else forward_role_buckets
         current = float(toi_per_g) if np.isfinite(toi_per_g) else 0.0
@@ -561,6 +606,8 @@ def build_one_season(y):
         else:
             roles.append(choose_role_label(pos, tpg))
     merged["RoleBucket"] = roles
+    
+    # Add role/position percentile values for players
     merged = add_percentiles_pos_role(merged)
     merged = merged.rename(columns={"playerId": "PlayerID"})
     merged = merged.loc[:, ~merged.columns.duplicated()]

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 EDA Presentation Visuals
 """
@@ -48,7 +49,7 @@ def r_to_color(rabs):
     if rabs >= 0.50: return "#fee08b" # yellow
     return "#cccccc"
 
-# Cap % histogram
+# Cap % histogram plot
 def plot_cap_hist(contracts):
     df = contracts.copy()
     if "Level" in df.columns:
@@ -69,7 +70,7 @@ def plot_cap_hist(contracts):
             rotation=90, va="top", ha="left", fontsize=9)
     savefig(f"{out_dir}/caphitpct_hist_{season}.png")
 
-# Cap % by position
+# Cap % by position plot
 def plot_cap_by_position(contracts):
     df = contracts.copy()
     if "Level" in df.columns:
@@ -112,7 +113,7 @@ def plot_cap_by_position(contracts):
     savefig(f"{out_dir}/caphitpct_by_position_{season}.png")
     plt.close()
 
-# Term vs Cap%
+# Term vs Cap % with min/max shading plot
 def plot_term_vs_cap(contracts):
     df = contracts.copy()
     if "Level" in df.columns:
@@ -138,7 +139,7 @@ def plot_term_vs_cap(contracts):
     plt.tight_layout()
     savefig(f"{out_dir}/term_vs_cap_mean_minmax_{season}.png")
 
-# Stint lengths + xG %
+# Stint lengths + xG % breakdown by situation plot
 def plot_stints(stints):
     dur = (pd.to_numeric(stints["endSec"], errors="coerce") - pd.to_numeric(stints["startSec"], errors="coerce")).clip(lower=0).dropna()
     dur = dur[dur <= 80]
@@ -168,7 +169,7 @@ def plot_stints(stints):
     ax2.bar(order, [100, 100, 100], color="#e6e6e6", edgecolor="black")
     ax2.bar(order, vals, color=colors, edgecolor="black")
     for i, v in enumerate(vals):
-        ax2.text(i, min(v, 98), f"{v:.1f}%", ha="center", va="bottom", fontsize=9) # keep label inside axis
+        ax2.text(i, min(v, 98), f"{v:.1f}%", ha="center", va="bottom", fontsize=9)
 
     ax2.set_ylim(0, 100)
     ax2.set_ylabel("% of stints with any xG")
@@ -177,16 +178,13 @@ def plot_stints(stints):
     savefig(f"{out_dir}/stints_duration_and_pct_xg_{season}.png")
 
 
-# Correlation pairs
+# Correlation pairs within NST data plot
 def plot_corr_pairs(nst_es):
     cols = [c for c in [
         "xGF_per60","xGA_per60","CF_per60","CA_per60","GF_per60","GA_per60",
         "SCF_per60","SCA_per60","HDCF_per60","HDCA_per60","iXG_per60","iCF_per60",
         "TOI_seconds"
         ] if c in nst_es.columns]
-    if len(cols) < 3:
-        print("[WARN] not enough NST ES columns for correlations.")
-        return
 
     df = nst_es[cols].apply(pd.to_numeric, errors="coerce")
     corr = df.corr()
@@ -208,7 +206,7 @@ def plot_corr_pairs(nst_es):
     plt.gca().invert_yaxis()
     plt.xlabel("|Pearson r|")
     plt.title(title_top_correlated_pairs)
-    for c, txt in [("#fee08b","≥0.50"),("#fdae6b","≥0.60"),("#fc8d59","≥0.70"),("#d7301f","≥0.85")]:
+    for c, txt in [("#fee08b",">=0.50"),("#fdae6b",">=0.60"),("#fc8d59",">=0.70"),("#d7301f",">=0.85")]:
         plt.plot([], [], color=c, linewidth=10, label=txt)
     plt.legend(title="Color by |r|", loc="lower right", frameon=False)
     plt.tight_layout()
@@ -223,4 +221,4 @@ if __name__ == "__main__":
     plot_term_vs_cap(contracts)
     plot_stints(stints)
     plot_corr_pairs(nst_es)
-    print("[DONE] Saved figures to:", out_dir)
+    print("Saved figures.")

@@ -1,6 +1,8 @@
+# -*- coding: utf-8 -*-
 """
 Helper to expand Goals per Win/Standing Point table to include most recent seasons
 Initial table/fill strategy found here: https://evolving-hockey.com/glossary/goals-above-replacement/
+Already ran, but if you want to run it again, delete the rows in the NHL_GOAL_TABLE_MASTER file after 2019
 """
 # Imports
 import pandas as pd
@@ -8,13 +10,14 @@ import numpy as np
 from pathlib import Path
 import re
 
+# Config
 project_root = Path(__file__).resolve().parents[2]
 hockey_reference_dir = project_root / "Data" / "Raw Data" / "HockeyReference"
 hockey_reference_template = "HR League Standings *.csv"
 moneypuck_dir = project_root / "Data" / "Raw Data" / "MoneyPuck" / "Team Level"
 moneypuck_template = "MP Team Level *.csv"
 out_path = project_root / "Data" / "Clean Data" / "NHL_GOAL_TABLE_MASTER.csv"
- 
+
 hr_to_mp = {
     "Anaheim Ducks": "ANA","Arizona Coyotes": "ARI","Boston Bruins": "BOS","Buffalo Sabres": "BUF",
     "Calgary Flames": "CGY","Carolina Hurricanes": "CAR","Chicago Blackhawks": "CHI","Colorado Avalanche": "COL",
@@ -35,26 +38,12 @@ def norm_season(season_raw):
     season_raw = str(season_raw).strip()
     if season_raw == "":
         return season_raw
-    match_year_short = re.match(r"^(\d{4})\season_raw*[-/]\season_raw*(\d{2})$", season_raw)
     match_year_long = re.match(r"^(\d{4})\season_raw*[-/]\season_raw*(\d{4})$", season_raw)
-    match_year_concatenated = re.match(r"^(\d{4})(\d{4})$", season_raw)
-    match_single_year = re.match(r"^(\d{4})$", season_raw)
-    if match_year_short:
-        start_year = int(match_year_short.group(1))
-        return f"{start_year}-{start_year+1}"
-    if match_year_long:
-        start_year = int(match_year_long.group(1))
-        end_year = int(match_year_long.group(2))
-        return f"{start_year}-{end_year}"
-    if match_year_concatenated:
-        start_year = int(match_year_concatenated.group(1))
-        end_year = int(match_year_concatenated.group(2))
-        return f"{start_year}-{end_year}"
-    if match_single_year:
-        start_year = int(match_single_year.group(1))
-        return f"{start_year}-{start_year+1}"
-    return season_raw
+    start_year = int(match_year_long.group(1))
+    end_year = int(match_year_long.group(2))
+    return f"{start_year}-{end_year}"
 
+# Parse the season from the file name (season is not contained in a column but data IS saved by season)
 def season_from_filename(path):
     filename = path.stem
     season_match = re.search(r"(20\d{2}\s*[-/]\s*20\d{2}|20\d{2}\s*[-/]\s*\d{2}|20\d{2}20\d{2}|20\d{2})", filename)
@@ -66,6 +55,7 @@ def first_year(season_label):
     except Exception:
         return -1
 
+# Parse point total from Win-Loss-OT Loss format NHL uses for point scoring (2-0-1 standing points respectively)
 def parse_overall_w_l_otl(record_str):
     record_str = str(record_str).strip()
     match_w_l_otl = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*$", record_str)
@@ -78,7 +68,8 @@ def parse_overall_w_l_otl(record_str):
 
     return None, None, None
 
-def wls_slope_y_on_x(y_values, x_values, weights):
+# Get approximate goals per slope for target x/y values
+def wls_slope(y_values, x_values, weights):
     valid_mask = ((~pd.isna(y_values)) & (~pd.isna(x_values)) & (~pd.isna(weights)) & (weights > 0))
     if valid_mask.sum() < 3:
         return np.nan
@@ -100,8 +91,8 @@ def fit_window_for_target_season(merged, season_label, window=3):
     
     window_data = merged[merged["Season"].isin(pool)].copy()
     window_data["recency_w"] = window_data["Season"].apply(lambda s: 1 + max(0, first_year(s) - (target_year - (window-1))))
-    slope_goals_per_win = wls_slope_y_on_x(window_data["GDPG"], window_data["WPG"], window_data["recency_w"])
-    slope_goals_per_point = wls_slope_y_on_x(window_data["GDPG"], window_data["PTSG"], window_data["recency_w"])
+    slope_goals_per_win = wls_slope(window_data["GDPG"], window_data["WPG"], window_data["recency_w"])
+    slope_goals_per_point = wls_slope(window_data["GDPG"], window_data["PTSG"], window_data["recency_w"])
     return slope_goals_per_win, slope_goals_per_point
 
 def load_hr_all():
@@ -120,14 +111,7 @@ def load_hr_all():
         OTL = pd.to_numeric(parsed.apply(lambda x: x[2] if x else 0),   errors="coerce").fillna(0).astype(int)
         PTS = 2*W + OTL
         GP = W + L + OTL
-        team_mp = (
-            df["Team"].astype(str)
-              .str.replace(r"[\*\u2020\u2021†]+","", regex=True)
-              .str.strip()
-              .map(hr_to_mp)
-              .astype(str)
-              .replace(mp_tricode_normalization)
-            )
+        team_mp = (df["Team"].astype(str).str.replace(r"[\*\u2020\u2021†]+","", regex=True).str.strip().map(hr_to_mp).astype(str).replace(mp_tricode_normalization))
         parts.append(pd.DataFrame({
             "Season": norm_season(season_from_filename(csv_path)),
             "TeamMP": team_mp,
@@ -141,6 +125,7 @@ def load_hr_all():
     out["Season"] = out["Season"].astype(str).apply(norm_season)
     return out
 
+# Ensure season tags match between MoneyPuck and HockeyReference
 def norm_season_from_mp(season_value):
     try:
         season_year = int(season_value) 
@@ -233,15 +218,20 @@ def load_master():
 
 # Main
 def main():
+    # Load league standings from HockeyReference and team goal data from MoneyPuck for all seasons
     hr_standings = load_hr_all()
     goal_diff = load_mp_goal_diff_for(sorted(hr_standings["Season"].dropna().unique().tolist()))
+    
+    # Identify the seasons where both sources overlap and keep only those at or after the recompute_from threshold
     seasons_to_recompute = sorted(set(hr_standings["Season"]).intersection(goal_diff["Season"]))
     seasons_to_recompute = [season_label for season_label in seasons_to_recompute if first_year(season_label) >= recompute_from]
+    
+    # Build a merged table with wins, losses and goals for/against for each season, plus derived goals-per-win and goals-per-point rates
     merged = build_merged_with_rates(hr_standings, goal_diff, season_list=seasons_to_recompute)
+    
+    # Load the existing NHL_GOAL_TABLE_MASTER (if any) as a baseline and either keep the prior value or update it (as long as the results are valid)
     master = load_master()
-    master_map = (
-        master.set_index("Season")[["GOALS_TO_WIN","GOALS_TO_STANDING_POINT"]].to_dict("index")
-        if not master.empty else {})
+    master_map = (master.set_index("Season")[["GOALS_TO_WIN","GOALS_TO_STANDING_POINT"]].to_dict("index") if not master.empty else {})
     
     def is_finite_pair(a, b):
         return np.isfinite(a) and np.isfinite(b)
@@ -252,7 +242,8 @@ def main():
             gtw_m = master_map[season_label].get("GOALS_TO_WIN")
             gtsp_m = master_map[season_label].get("GOALS_TO_STANDING_POINT")
             if is_finite_pair(gtw_m, gtsp_m):
-                gtw, gtsp = float(gtw_m), float(gtsp_m)
+                gtw = float(gtw_m)
+                gtsp = float(gtsp_m)
             else:
                 gtw, gtsp = fit_window_for_target_season(merged, season_label, window=3)
         else:
@@ -271,6 +262,7 @@ def main():
     else:
         updated = updates
 
+    # Combine rows, drop duplicates, and overwrite to master CSV
     updated = updated[["Season","GOALS_TO_WIN","GOALS_TO_STANDING_POINT"]]
     updated["Season"] = updated["Season"].astype(str).apply(norm_season)
     updated = updated.drop_duplicates(subset=["Season"], keep="last").sort_values("Season").reset_index(drop=True)

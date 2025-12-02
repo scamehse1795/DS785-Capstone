@@ -27,6 +27,7 @@ offense_curve_plot_name = "age_curve_offense.png"
 defense_curve_plot_name = "age_curve_defense.png"
 age_list = list(range(18, 39))
 
+# Rough curve findings for each person's work; values normalized to a 0-1 scale
 curve_parameters = {
     "Dom": {
         "F": dict(
@@ -85,6 +86,7 @@ def interpolate_between_points(x0, y0, x1, y1, x):
     t = (x - x0) / float(x1 - x0)
     return y0 + t * (y1 - y0)
 
+# Fit curve based on the values in the config section and fill between each rough point
 def piecewise_curve(age, p):
     start_age, start_val = p["start_age"], p["start_val"]
     rise_end_age, rise_end_val = p["rise_end_age"], p["rise_end_val"]

@@ -42,12 +42,11 @@ for year in range(last_cap_start_year + 1, 2035):
     cap_table[season_key] = round(cap_table[prev_season_key] * (1 + cap_growth_limit))
  
 terms_list = list(range(1, 9))
-
 gar_to_spar_ratio = 2.9245                  # 2024-2025 GAR -> SPAR conversion
 spar_dollar_rate_2025 = 1571475.16220797    # $ per SPAR for 2025-26
 league_min_aav = 750000.0
 
-# [historical line, band fill, projected line]
+# [historical line, band fill, projected line] color palletes for teams
 team_colors = {
     "ANA": ["#F47A38", "#F9C8A8", "#006272"],
     "ARI": ["#8C2633", "#C88B96", "#E2D6B5"],
@@ -89,27 +88,27 @@ column_min_height = "910px"
 graph_height_px = 740
 
 # Helpers
-def require_cols(df, needed, src):
+def require_cols(df, needed):
     miss = [c for c in needed if c not in df.columns]
     if miss:
         raise RuntimeError
 
-def to_int_safe(x, default=0):
+def to_int(x, default=0):
     try:
         return int(x)
     except Exception:
         return default
 
-def percent_to_fraction(x):
+def percent_to_fraction(percent):
     try:
-        v = float(x)
+        percent_float = float(percent)
     except Exception:
         return np.nan
-    return v / 100.0
+    return percent_float / 100.0
 
-def season_start_int(s):
+def season_start_int(season):
     try:
-        return int(str(s).split("-")[0])
+        return int(str(season).split("-")[0])
     except Exception:
         return 0
 
@@ -127,23 +126,24 @@ def projection_season_keys_inclusive(start_season, n_years):
         return [keys[min(si+i, len(keys)-1)] for i in range(0, n_years)]
     return []
 
-def percentile_to_color(p):
-    if pd.isna(p): return "rgb(200,200,200)"
-    p = max(0.0, min(100.0, float(p)))
-    if p <= 50:
-        t = p / 50.0
+def percentile_to_color(percentile):
+    if pd.isna(percentile): 
+        return "rgb(200,200,200)"
+    percentile = max(0.0, min(100.0, float(percentile)))
+    if percentile <= 50:
+        t = percentile / 50.0
         r = 255 - int(127*t) 
         g = int(128*t)
         b = int(128*t)
     else:
-        t = (p-50.0)/50.0
+        t = (percentile - 50.0)/50.0
         r = 128 - int(128*t) 
         g = 128 - int(128*t)
         b = 128 + int(127*t)
     return f"rgb({r},{g},{b})"
 
 def map_player_value_columns(df):
-    require_cols(df, ["playerId","statsSeason","p$SPAR"], "player_value")
+    require_cols(df, ["playerId","statsSeason","p$SPAR"])
     out = df.rename(columns={"p$SPAR":"SPAR_dollars"})
     out["playerId"] = pd.to_numeric(out["playerId"], errors="coerce")
     out["SPAR_dollars"] = pd.to_numeric(out["SPAR_dollars"], errors="coerce")
@@ -161,15 +161,17 @@ def hex_to_rgba(hex_color, alpha):
         r = g = b = 0
     return f"rgba({r},{g},{b},{alpha})"
 
+# Load all data, standardize IDs, and merge into master table
 def load_all_data():
     contracts_df = pd.read_csv(data_files["contracts"], low_memory=False)
     gar_war_df = pd.read_csv(data_files["garwar"], low_memory=False)
     nst_es_df = pd.read_csv(data_files["nst_team"], low_memory=False)
 
-    pv_2324 = map_player_value_columns(pd.read_csv(data_files["value_2324"], low_memory=False))
-    pv_2425 = map_player_value_columns(pd.read_csv(data_files["value_2425"], low_memory=False))
-    pv_2526 = map_player_value_columns(pd.read_csv(data_files["value_2526"], low_memory=False))
-    player_value_df = pd.concat([pv_2324, pv_2425, pv_2526], ignore_index=True)
+    # Player value (SPAR$) across seasons
+    player_value_2324 = map_player_value_columns(pd.read_csv(data_files["value_2324"], low_memory=False))
+    player_value_2425 = map_player_value_columns(pd.read_csv(data_files["value_2425"], low_memory=False))
+    player_value_2526 = map_player_value_columns(pd.read_csv(data_files["value_2526"], low_memory=False))
+    player_value_df = pd.concat([player_value_2324, player_value_2425, player_value_2526], ignore_index=True)
     player_value_df["curr_season"] = player_value_df["statsSeason"].apply(season_start_int)
     player_value_df = player_value_df.sort_values(["playerId", "curr_season"]).drop(columns="curr_season")
 
@@ -178,7 +180,7 @@ def load_all_data():
             frame["playerId"] = pd.to_numeric(frame["playerId"], errors="coerce")
 
     # GAR/WAR + percentiles
-    require_cols(gar_war_df, ["PlayerID", "GAR_total"], "Skater_GAR_WAR_2024-2025.csv")
+    require_cols(gar_war_df, ["PlayerID", "GAR_total"])
     gar_war_df = gar_war_df.rename(columns={"PlayerID": "playerId"})
     pct_cols = [c for c in gar_war_df.columns if str(c).startswith("pct_")]
 
@@ -205,10 +207,15 @@ def load_all_data():
         or c.startswith("proj_GAR_total_high_year")
         ]
 
+    # Map NST team to simple team code
     contracts_trim = contracts_df[keep_cols + len_cols + comp_cols + proj_cols].copy()
-    require_cols(nst_es_df, ["playerId", "TeamStd_Primary"], "NST_player_master_ES_2024-2025.csv")
-    nst_trim = (nst_es_df[["playerId", "TeamStd_Primary"]].drop_duplicates("playerId").rename(columns={"TeamStd_Primary": "Team"})) 
+    require_cols(nst_es_df, ["playerId", "TeamStd_Primary"])
+    nst_trim = (nst_es_df[["playerId", "TeamStd_Primary"]].drop_duplicates("playerId").rename(columns={"TeamStd_Primary": "Team"}))
+    
+    # Merge GAR/WAR, team info, and contracts into a single master table
     master = (gar_war_df.merge(nst_trim, on="playerId", how="left").merge(contracts_trim, on="playerId", how="left"))
+    
+    # Resolve duplicated RoleBucket columns from the merge if present
     if "RoleBucket_x" in master.columns or "RoleBucket_y" in master.columns:
         role = None
         if "RoleBucket_x" in master.columns:
@@ -222,16 +229,12 @@ def load_all_data():
         drop_cols = [c for c in ["RoleBucket_x", "RoleBucket_y"] if c in master.columns]
         master = master.drop(columns=drop_cols)
 
+    # Build dropdown player list from contracts
     player_list = contracts_trim[["playerId", "PlayerName", "Pos"]].copy()
-
     player_list["playerId"] = pd.to_numeric(player_list["playerId"], errors="coerce")
     player_list = player_list.dropna(subset=["playerId"])
 
-    player_list["PlayerName"] = (
-        player_list["PlayerName"]
-        .astype(str)
-        .str.strip()
-        )
+    player_list["PlayerName"] = player_list["PlayerName"].astype(str).str.strip()
     player_list = player_list[player_list["PlayerName"] != ""]
 
     # Deduplicate by playerId
@@ -248,9 +251,12 @@ def load_all_data():
 
     return master, options, pct_cols, player_value_df, gar_pct
 
+# Initialize Dash app and load data
 app = Dash(__name__)
 player_master_df, dropdown_options, pct_columns, player_value, GAR_percentile = load_all_data()
 default_pid = dropdown_options[0]["value"] if dropdown_options else None
+
+# Base style for percentile tiles
 tile_base_style = {
     "minWidth": "175px", "height": "110px",
     "display": "flex", "flexDirection": "column",
@@ -259,9 +265,11 @@ tile_base_style = {
     "color": "white", "textAlign": "center", "padding": "10px"
     }
 
+# App layout: top controls + left (demo/comps) + right (plot/surplus)
 app.layout = html.Div([
     html.H2("NHL Contract Dashboard", style={"textAlign":"center","marginBottom":"6px"}),
 
+    # Top controls row: player dropdown, units toggle, term slider
     html.Div([
         html.Div([
             html.Label("Select Player"),
@@ -275,7 +283,8 @@ app.layout = html.Div([
             html.Label("Term"),
             dcc.Slider(id="term-slider", min=1, max=8, step=1, value=1, marks={i:str(i) for i in terms_list})], style={"minWidth":"320px","marginLeft":"10px","flex":"1"})], 
                 style={"display":"flex","flexWrap":"wrap","gap":"8px","alignItems":"center","margin":"0 10px"}),
-
+    
+    # Main body: left column (demo/tiles/comps) and right column (graph/surplus)
     html.Div([
         html.Div([
             html.Div(id="bio-card", style={"marginTop":"10px"}),
@@ -301,6 +310,7 @@ app.layout = html.Div([
         ], style={"display":"flex","gap":"10px","alignItems":"stretch"})
 ], style={"paddingBottom":"12px"})
 
+# Choose a default term when a player is selected
 @app.callback(
     Output("term-slider", "value"),
     Input("player-dropdown", "value"),
@@ -313,10 +323,11 @@ def default_term(player_id):
         return 1
     row = player_rows.iloc[0]
 
-    if "Length" in row.index and pd.notna(row["Length"]) and to_int_safe(row["Length"], 0) in terms_list:
-        return to_int_safe(row["Length"], 1)
+    if "Length" in row.index and pd.notna(row["Length"]) and to_int(row["Length"], 0) in terms_list:
+        return to_int(row["Length"], 1)
     return 1
 
+# Update main dashboard for new player
 @app.callback(
     [
         Output("bio-card","children"),
@@ -334,14 +345,18 @@ def default_term(player_id):
     ]
 )
 
+# Pulls selected player, builds tiles, comps, plot, and surplus summary
 def update(player_id, units, active_term, overlays):
     player_rows = player_master_df[player_master_df["playerId"] == player_id]
     if player_rows.empty: 
         player_rows = player_master_df.iloc[[0]]
     row = player_rows.iloc[0]
-    term = to_int_safe(active_term, 0)
+    term = to_int(active_term, 0)
+    
+    # Try to locate the role bucket column (handles naming collisions)
     role_col = next((c for c in row.index if str(c).lower()=="rolebucket"), None)
 
+    # Basic demo fields
     pos = row.get("Pos", "NA")
     shot = row.get("Shot", "NA")
     if isinstance(shot, str) and shot: 
@@ -353,17 +368,17 @@ def update(player_id, units, active_term, overlays):
         age = float(age)
     except Exception: 
         age = np.nan
-    h_in = row.get("Height_in", "NA")
-    w_lb = row.get("Weight_lb", "NA")
+    height_in = row.get("Height_in", "NA")
+    weight_lb = row.get("Weight_lb", "NA")
     role = row.get(role_col, "NA") if role_col else "NA"
     bio = html.Div([
         html.H3(name),
         html.P(f"Pos: {pos} | Shot: {shot} | Team: {team}"),
-        html.P(f"Age at signing: {age if pd.notna(age) else 'NA'} | H: {h_in} in | W: {w_lb} lb"),
+        html.P(f"Age at signing: {age if pd.notna(age) else 'NA'} | H: {height_in} in | W: {weight_lb} lb"),
         html.P(f"Role: {role}")
         ])
 
-    # Percentiles
+    # Percentile tiles
     tiles = []
     gar_row = GAR_percentile[ GAR_percentile["playerId"] == player_id ]
     if gar_row.empty:
@@ -381,6 +396,7 @@ def update(player_id, units, active_term, overlays):
             html.Div(txt, style={"fontSize":"28px","fontWeight":"800","marginTop":"4px"})
             ], style=dict(tile_base_style, **{"backgroundColor": color})))
         
+    # Historical player value rows (SPAR$), ordered by season
     player_value_row = player_value[player_value["playerId"] == player_id].copy()
     if "statsSeason" in player_value_row.columns:
         player_value_row["stat_season_temp"] = player_value_row["statsSeason"].apply(season_start_int)
@@ -394,6 +410,7 @@ def update(player_id, units, active_term, overlays):
     if "-" not in start_season: start_season = "2025-2026"
     season_S = shift_season(start_season, -1)
 
+    # Historical SPAR$ series, plotted either as $ value or equivalent cap %
     if not player_value_row.empty and "SPAR_dollars" in player_value_row.columns:
         if units == "usd":
             y_vals = player_value_row["SPAR_dollars"]
@@ -406,23 +423,26 @@ def update(player_id, units, active_term, overlays):
             x=player_value_row["statsSeason"].astype(str).tolist(), y=y_vals.tolist(), mode="lines+markers", name="Historical",
             line=dict(color=hist_color, width=3), marker=dict(color=hist_color)
             ))
-        rS = player_value_row[player_value_row["statsSeason"] == season_S]
-        if not rS.empty:
-            sparS = float(rS.iloc[0]["SPAR_dollars"])
+        prev_season_row = player_value_row[player_value_row["statsSeason"] == season_S]
+        if not prev_season_row.empty:
+            sparS = float(prev_season_row.iloc[0]["SPAR_dollars"])
             capS = float(cap_table.get(season_S, np.nan))
             if capS > 0: hist_S_cap_pct = (sparS / capS) * 100.0
             if units == "usd": hist_last_usd = sparS
 
+    # Build projection rows from precomputed GAR projections
     proj_rows = []
-    for k in range(1, 10):
-        gar_mid = row.get(f"proj_GAR_total_year{k}", np.nan)
-        gar_lo = row.get(f"proj_GAR_total_low_year{k}", np.nan)
-        gar_hi = row.get(f"proj_GAR_total_high_year{k}", np.nan)
+    for projection_index in range(1, 10):
+        gar_mid = row.get(f"proj_GAR_total_year{projection_index}", np.nan)
+        gar_lo = row.get(f"proj_GAR_total_low_year{projection_index}", np.nan)
+        gar_hi = row.get(f"proj_GAR_total_high_year{projection_index}", np.nan)
         if pd.isna(gar_mid):
             continue
 
-        season_k = shift_season(start_season, k - 1)
+        season_k = shift_season(start_season, projection_index - 1)
         cap_k = cap_table.get(season_k, np.nan)
+        
+        # GAR -> SPAR -> $
         spar_mid = (gar_mid / gar_to_spar_ratio)
         spar_lo = (gar_lo / gar_to_spar_ratio) if not pd.isna(gar_lo) else np.nan
         spar_hi = (gar_hi / gar_to_spar_ratio) if not pd.isna(gar_hi) else np.nan
@@ -430,6 +450,7 @@ def update(player_id, units, active_term, overlays):
         usd_lo = spar_lo * spar_dollar_rate_2025 if not pd.isna(spar_lo) else np.nan
         usd_hi = spar_hi * spar_dollar_rate_2025 if not pd.isna(spar_hi) else np.nan
         
+        # Enforce league minimum AAV for projections
         if not pd.isna(usd_mid) and usd_mid < league_min_aav:
             usd_mid = league_min_aav
         if not pd.isna(usd_lo) and usd_lo < league_min_aav:
@@ -459,6 +480,7 @@ def update(player_id, units, active_term, overlays):
 
     proj_df = pd.DataFrame(proj_rows)
 
+    # Projected series (mid + low/high for band)
     if not proj_df.empty:
         if units == "usd":
             proj_x_list = proj_df["statsSeason"].astype(str).tolist()
@@ -476,7 +498,7 @@ def update(player_id, units, active_term, overlays):
         proj_lo_list = []
         proj_hi_list = []
 
-    # dotted projected curve
+    # Dotted projected curve
     traces.append(go.Scatter(x=proj_x_list, y=proj_y_list, mode="lines+markers", name="Projected", line=dict(color=proj_color, width=3, dash="dot")))
     if pd.notna(hist_S_cap_pct) and len(proj_x_list) > 0 and units == "cap":
         traces.append(go.Scatter(
@@ -493,7 +515,7 @@ def update(player_id, units, active_term, overlays):
             line=dict(color=proj_color, width=2, dash="dot"), showlegend=False
             ))
 
-    # Uncertainty band
+    # Uncertainty band for projections
     if "projband" in (overlays or []):
         traces.append(go.Scatter(x=proj_x_list, y=proj_lo_list, mode="lines",
                                  line=dict(color="rgba(0,0,0,0)", width=0), showlegend=False))
@@ -502,30 +524,32 @@ def update(player_id, units, active_term, overlays):
                                  fill="tonexty", fillcolor="rgba(0,0,0,0.12)", name="Projection range"))
 
     fig = go.Figure(data=traces)
-    s_mark_x, s_mark_y, s_lbl = [], [], []
+    s_mark_x = []
+    s_mark_y = []
+    s_mark_labels = []
     if not player_value_row.empty and "SPAR_dollars" in player_value_row.columns:
         for delta, tag in [(-2,"S-2"), (-1,"S-1"), (0,"S")]:
             tgt = shift_season(start_season, delta)
             r = player_value_row[player_value_row["statsSeason"] == tgt]
             if not r.empty:
                 if units == "usd":
-                    yv = float(r.iloc[0]["SPAR_dollars"])
+                    y_val = float(r.iloc[0]["SPAR_dollars"])
                 else:
                     cap = cap_table.get(tgt, np.nan)
-                    yv = float(r.iloc[0]["SPAR_dollars"]) / float(cap) * 100.0 if pd.notna(cap) else np.nan
-                if pd.notna(yv):
+                    y_val = float(r.iloc[0]["SPAR_dollars"]) / float(cap) * 100.0 if pd.notna(cap) else np.nan
+                if pd.notna(y_val):
                     s_mark_x.append(str(tgt))
-                    s_mark_y.append(yv)
-                    s_lbl.append(tag)
+                    s_mark_y.append(y_val)
+                    s_mark_labels.append(tag)
     if s_mark_x:
         fig.add_trace(go.Scatter(
-            x=s_mark_x, y=s_mark_y, mode="markers+text", text=s_lbl, textposition="top center",
+            x=s_mark_x, y=s_mark_y, mode="markers+text", text=s_mark_labels, textposition="top center",
             name="S-2/S-1/S", marker=dict(size=9, color="rgba(0,0,0,0.55)")
             ))
 
     # Contract AAV band (cap % varies by season, AAV fixed in USD)
     cap_frac_selected = percent_to_fraction(row.get(f"capPct_len{active_term}"))
-    term_contract = to_int_safe(active_term, 0)
+    term_contract = to_int(active_term, 0)
 
     if "contract" in (overlays or []) and pd.notna(cap_frac_selected) and term_contract > 0:
         # Anchor AAV off 2025-2026 cap
@@ -533,16 +557,18 @@ def update(player_id, units, active_term, overlays):
         if pd.notna(anchor_cap):
             aav_usd_contract = float(cap_frac_selected) * float(anchor_cap)
             seasons_in_contract = projection_season_keys_inclusive(start_season, term_contract + 1)
-            x_line, y_line = [], []
-            for i, s in enumerate(seasons_in_contract):
-                is_last_boundary = (i == len(seasons_in_contract) - 1)
+            x_line = []
+            y_line = []
+            for season_index, season_label in enumerate(seasons_in_contract):
+                is_last_boundary = (season_index == len(seasons_in_contract) - 1)
 
+                # Extend last point to boundary for a band shape
                 if is_last_boundary and y_line:
-                    x_line.append(s)
+                    x_line.append(season_label)
                     y_line.append(y_line[-1])
                     continue
 
-                cap_s = cap_table.get(s, np.nan)
+                cap_s = cap_table.get(season_label, np.nan)
                 if pd.isna(cap_s) or cap_s <= 0:
                     continue
 
@@ -551,7 +577,7 @@ def update(player_id, units, active_term, overlays):
                 else:
                     y_val = aav_usd_contract
 
-                x_line.append(s)
+                x_line.append(season_label)
                 y_line.append(y_val)
 
             if len(x_line) == 1:
@@ -564,6 +590,7 @@ def update(player_id, units, active_term, overlays):
                 band_rgb = team_colors.get(team, ["#000000", "#CCCCCC", "#1f77b4"])[1]
                 band_fill = hex_to_rgba(band_rgb, 0.2)
 
+                # Filled band
                 fig.add_trace(go.Scatter(
                     x=x_line,
                     y=y_line,
@@ -574,6 +601,7 @@ def update(player_id, units, active_term, overlays):
                     fillcolor=band_fill
                     ))
                 
+                # Visible line on top of band
                 fig.add_trace(go.Scatter(
                     x=x_line,
                     y=y_line,
@@ -591,7 +619,7 @@ def update(player_id, units, active_term, overlays):
     for i in idxs:
         nm = row.get(f"comp{i}_PlayerName")
         sy = str(row.get(f"comp{i}_Start_Year"))
-        trm = to_int_safe(row.get(f"comp{i}_Length"), 0)
+        trm = to_int(row.get(f"comp{i}_Length"), 0)
         capf = percent_to_fraction(row.get(f"comp{i}_CapPct"))
         if "-" in sy and trm > 0 and pd.notna(capf):
             keys = list(cap_table.keys())
@@ -605,7 +633,8 @@ def update(player_id, units, active_term, overlays):
                     line=dict(color="rgba(0,0,0,0.35)", width=2, dash="dash"),
                     marker=dict(size=5, opacity=0.85), name=f"Comp: {nm} ({trm}y)"
                     ))
-
+                
+    # Compute y-axis bounds across all traces
     all_y = [0.0]
     for t in fig.data:
         ys = t["y"]
@@ -618,6 +647,8 @@ def update(player_id, units, active_term, overlays):
                     pass
     ymin, ymax = (min(all_y), max(all_y)) if all_y else (0.0, 1.0)
     pad = 0.05 * (ymax - ymin if ymax != ymin else 1.0)
+    
+    # x-axis categories (history + projections in chronological order)
     xcats = list(dict.fromkeys((player_value_row["statsSeason"].astype(str).tolist() if not player_value_row.empty else []) + proj_x_list))
 
     fig.update_layout(
@@ -628,10 +659,11 @@ def update(player_id, units, active_term, overlays):
                    autorange=False, range=[ymin - pad, ymax + pad]),
         template="plotly_white", height=graph_height_px)
 
-    # Surplus box
+    # Surplus box: compare projected value vs. anchored AAV over selected term
     cap_frac = cap_frac_selected
     anchor_cap_for_aav = cap_table.get("2025-2026", cap_table.get(start_season, np.nan))
     if units == "usd":
+        # Surplus computed directly in dollars
         if pd.notna(cap_frac) and pd.notna(anchor_cap_for_aav):
             aav_usd = float(cap_frac) * float(anchor_cap_for_aav)
         else:
@@ -644,6 +676,7 @@ def update(player_id, units, active_term, overlays):
         else:
             surplus_txt = "Excess Value: N/A"
     else:
+        # Surplus computed by converting cap% projections back to USD first
         fut = proj_df.head(term).copy()
         if not fut.empty and pd.notna(cap_frac) and pd.notna(anchor_cap_for_aav):
             fut["cap"] = fut["statsSeason"].map(cap_table)
@@ -667,7 +700,7 @@ def update(player_id, units, active_term, overlays):
     for i in range(1, 11):
         nm  = row.get(f"comp{i}_PlayerName")
         posc = row.get(f"comp{i}_Pos")
-        yr  = row.get(f"comp{i}_Start_Year")
+        yr = row.get(f"comp{i}_Start_Year")
         trm = row.get(f"comp{i}_Length")
         cpc = row.get(f"comp{i}_CapPct")
         simp = row.get(f"comp{i}_sim_pct")
@@ -693,7 +726,9 @@ def update(player_id, units, active_term, overlays):
 
 # Main
 def main():
-    host, port = "127.0.0.1", 8050
+    # Host dashboard locally and auto-open browser tab
+    host = "127.0.0.1"
+    port = 8050
     url = f"http://{host}:{port}/"
     def open_browser():
         time.sleep(1.0)

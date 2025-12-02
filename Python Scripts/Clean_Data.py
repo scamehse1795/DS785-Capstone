@@ -42,6 +42,7 @@ long_to_std = {
 onice_totals = ["GF","GA","xGF","xGA","CF","CA","FF","FA","SF","SA","HDCF","HDCA","SCF","SCA","HDGF","HDGA"]
 indiv_totals = ["iCF","iFF","iSF","iXG","iHDCF","iSCF","iG","iP","iA1","iA2"]
 
+# Config values for outlier tagging
 min_toi_for_rates_seconds = 300.0
 es_max = 10.0
 pp_max = 25.0
@@ -49,6 +50,9 @@ pk_max = 25.0
 
 suffix_list = {"jr","jr.","sr","sr.","ii","iii","iv","v"}
 
+# Full list of name misses tied to a "canonical" name to replace them with
+# Usually due to the name in NST/contract not matching API in a way basic cleaning cannot map
+# i.e. "Mat?j Blumel" for Matej or many russian names using completely different spellings (ex. Artyom vs Artem)
 full_name_replacement_list = {
     "mat?j blumel":"matej blumel",
     "mat j blumel":"matej blumel",
@@ -152,6 +156,7 @@ def strip_accents(x):
     s = unicodedata.normalize("NFKD", str(x))
     return "".join(ch for ch in s if not unicodedata.combining(ch))
 
+# Make sure any special characters like dashes and apposrophies are standardized
 def canonical_name(raw):
     if pd.isna(raw):
         return ""
@@ -189,36 +194,6 @@ def split_first_last(full):
     if len(tokens) == 1:
         return tokens[0], ""
     return "", ""
-
-def find_nst_seasons():
-    roots = [
-        raw_root / "NaturalStatTrick" / "Skaters" / "On-Ice" / "Even Strength" / "Counts",
-        raw_root / "NaturalStatTrick" / "Skaters" / "On-Ice" / "Power Play" / "Counts",
-        raw_root / "NaturalStatTrick" / "Skaters" / "On-Ice" / "Penalty Kill" / "Counts",
-        ]
-    found = set()
-    pat = re.compile(r"(\d{4}-\d{4})")
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for path in root.iterdir():
-            m = pat.search(path.name)
-            if m:
-                found.add(m.group(1))
-    return sorted(found)
-
-
-def parse_season_start(s):
-    m = re.search(r"(\d{4})", str(s))
-    return int(m.group(1)) if m else None
-
-def filter_seasons(seasons, y0, y1):
-    out = []
-    for s in seasons:
-        k = parse_season_start(s)
-        if k is not None and y0 <= k <= y1:
-            out.append(s)
-    return sorted(set(out), key=parse_season_start)
 
 def nst_paths(season):
     return {
@@ -410,7 +385,7 @@ def build_name_to_id_map(pgs_path):
             out[k] = int(pid)
     return out
 
-# Aggregation
+# Aggregation for NST stats into single data frames, then single files
 def aggregate_counts(df, situation):
     if df is None:
         return None
@@ -584,15 +559,19 @@ def build_situation_master(paths, season, pref, label, name_to_id):
         "iA1_60":"iA1_per60","iA2_60":"iA2_per60"
         }
     m = m.rename(columns={c: rename_map[c] for c in m.columns if c in rename_map})
-    
     return m
 
 def situation_max(label):
-    if label == "Even Strength": return es_max
-    if label == "Power Play": return pp_max
-    if label == "Penalty Kill": return pk_max
+    if label == "Even Strength": 
+        return es_max
+    if label == "Power Play": 
+        return pp_max
+    if label == "Penalty Kill": 
+        return pk_max
+    
     return es_max
 
+# Flag players with high xG values but low TOI (or missing TOI entirely) and append reason
 def flag_outliers(df, label):
     if df is None or len(df) == 0:
         return pd.DataFrame()
@@ -604,10 +583,10 @@ def flag_outliers(df, label):
         bad = False
         why = []
         if pd.isna(t) or t <= 0: bad = True
-        why.append("zero_or_nan_TOI")
+        why.append("zero or nan TOI")
         if pd.notna(t) and float(t) < min_toi_for_rates_seconds and pd.notna(v) and abs(float(v)) > th:
             bad = True 
-            why.append("small_TOI_high_rate")
+            why.append("small TOI high xG rate")
         if pd.notna(v) and float(v) > th*3:
             bad = True 
             why.append("extreme_xGF60")
@@ -616,6 +595,7 @@ def flag_outliers(df, label):
                          "xGF_per60":float(v) if pd.notna(v) else np.nan,"Reasons":";".join(why)})
     return pd.DataFrame(rows)
 
+# Grab demographic data for players from master file and append it to contract data
 def attach_demographics_from_players_master(contracts_df: pd.DataFrame, players_master_path: Path):
     if contracts_df is None or contracts_df.empty:
         return contracts_df
@@ -649,11 +629,16 @@ def attach_demographics_from_players_master(contracts_df: pd.DataFrame, players_
 
 # Season Driver
 def process_season(season):
+    # Find NST paths for given season
     paths = nst_paths(season)
     out_dir = Path(paths["OUT_DIR"])
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Clean the NST player-game stats file so names, team codes and TOI fields are standardized
     clean_player_game_stats(paths["PGS"])
     season_map = build_name_to_id_map(paths["PGS"])
+    
+    # Build a mapping from canonical names to playerIds using the API players master file, falling back to manual replacement maps when necessary
     global_map = {}
     if players_master_file.exists():
         api = pd.read_csv(players_master_file, low_memory=False)
@@ -678,6 +663,7 @@ def process_season(season):
             if key and pd.notna(pid) and key not in global_map:
                 global_map[key] = int(pid)
 
+    # Apply name mapping to each situation and save clean seasonal NST masters
     name_to_id = global_map.copy()
     name_to_id.update(season_map)
     es = build_situation_master(paths, season, "EV", "Even Strength", name_to_id)
@@ -711,6 +697,7 @@ def process_season(season):
         missing_dir.mkdir(parents=True, exist_ok=True)
         outliers.to_csv(missing_dir / f"NST_outliers_{season}.csv", index=False)
 
+# Add demographic data to the contract data (was present in PuckPedia but not CapWages; this will also allow backfilling demographics anyway once PuckPedia scraping is functional)
 def update_contracts_master(contracts_csv=contracts_master_file, api_master_csv=players_master_file):
     contracts_path = Path(contracts_csv).resolve()
     api_path = Path(api_master_csv).resolve()
@@ -766,10 +753,11 @@ def update_contracts_master(contracts_csv=contracts_master_file, api_master_csv=
     tmp_path.replace(contracts_path)
 
 def main():
-    seasons = filter_seasons(find_nst_seasons(), start_year, end_year)
-    for s in seasons:
+    # Clean naming issues and NST player-game stats
+    for s in range(start_year, end_year + 1):
         process_season(s)
-
+    
+    # Update contract master by mapping playerIds to contract data as well as demographic data
     update_contracts_master(contracts_master_file, players_master_file)
     contracts_df = pd.read_csv(contracts_master_file, low_memory=False)
     contracts_df = attach_demographics_from_players_master(contracts_df, players_master_file)

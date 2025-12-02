@@ -13,7 +13,8 @@ EDIT: I had to drop PuckPedia entirely, as the HTML background change hid severa
 can access on PuckPedia. As such, this script ONLY scrapes CapWages and still performs the necessary parsing to PuckPedia headers,
 but I need more time than I have to fix the PuckPedia scraping itself.
 
-NOTE: DO NOT CLOSE THE BROWSER POP-UP, as that will kill the scraping.
+NOTE: DO NOT CLOSE THE BROWSER POP-UP, as that will kill the scraping. Minimizing the window is fine, as it will work in the background,
+but closing it before it closes normally will break the scraper mid-run.
 """
 # Imports
 from selenium import webdriver
@@ -47,7 +48,7 @@ target_columns = [
     "Expiry Status","Signing Agent","Signing GM","Signing Season"
     ]
 
-# For calcualting Start Yr Cap % for capwages data
+# For calcualting Start Yr Cap % for CapWages data
 cap_table = {
     "2015-2016": 71400000,
     "2016-2017": 73000000,
@@ -64,10 +65,7 @@ cap_table = {
     "2027-2028": 113500000
     }
 
-# Helpers
-def ensure_dir(p: Path):
-    p.parent.mkdir(parents=True, exist_ok=True)
-    
+# Helpers  
 def season_label(year):
     return f"{year}-{year+1}"
 
@@ -186,6 +184,7 @@ def expand_season_label(label):
     y1 = parse_first_year(label)
     return f"{y1}-{y1+1}" if y1 else label
 
+# Create name/position/start year/length/cap hit key for deduplication
 def make_contract_key(row):
     name = str(row.get("Skaters","")).strip().lower()
     pos = row.get("Pos","")
@@ -248,9 +247,9 @@ def capwages_open(driver):
     time.sleep(1.25)
     driver.get(capwages_base_url)
     WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.XPATH, "//main")))
-    WebDriverWait(driver, 20).until(lambda d:
-        len(d.find_elements(By.XPATH, cw_tbody_rows)) > 0 or len(d.find_elements(By.XPATH, "//main//*[self::select or @role='combobox']")) > 0)
+    WebDriverWait(driver, 20).until(lambda d: len(d.find_elements(By.XPATH, cw_tbody_rows)) > 0 or len(d.find_elements(By.XPATH, "//main//*[self::select or @role='combobox']")) > 0)
 
+# Open dropdown menu to select seasons
 def capwages_open_menu(driver):
     selects = driver.find_elements(By.XPATH, "//main//select")
     if selects:
@@ -266,6 +265,7 @@ def capwages_open_menu(driver):
             time.sleep(0.2)
             return
 
+# Select season from dropdown
 def capwages_select_option(driver, label_text):
     selects = driver.find_elements(By.XPATH, "//main//select")
     if selects:
@@ -397,9 +397,9 @@ def scrape_capwages_table(driver):
     else:
         return pd.DataFrame(data)
 
+# Ensure CapWages columns line up with PuckPedia column names, filling in columns where necessary
 def harmonize_capwages_df(source_df, season_label_str):
     temp_df = source_df.copy()
-
     rename = {}
     for c in temp_df.columns:
         cu = clean_spaces(c).upper()
@@ -465,6 +465,7 @@ def harmonize_capwages_df(source_df, season_label_str):
     temp_df = temp_df[temp_df["Pos"] != "G"].copy()
 
     # approximate signing age (data has current age, so use delta from current season to signing season. Eventually erplace with birth date calculation)
+    # NOTE: I now have birthdate saved but when I made this script, I did not, hence why it is in my data but not factored in here
     scrape_season = today_scrape_season()
     try:
         scrape_y1 = int(scrape_season.split("-")[0])
@@ -519,9 +520,13 @@ def harmonize_capwages_df(source_df, season_label_str):
 
 def scrape_capwages(start_year, end_year):
     time.sleep(1.0)
+    # Start Chromedriver targetting CapWages signing page
+    # NOTE: DO NOT CLOSE THE BROWSER WINDOW (minimizing is fine)
     driver = make_driver()
     out = {}
     capwages_open(driver)
+    
+    # For each label, select the dropdown option and render the table
     first_year = max(2015, start_year)
     for year in range(first_year, end_year + 1):
         label = f"{year}-{str(year + 1)[-2:]}"
@@ -530,19 +535,27 @@ def scrape_capwages(start_year, end_year):
             continue
 
         time.sleep(1.25)
+        
+        # Scrape the table and store
         df = scrape_capwages_table(driver)
         if not df.empty:
             out[label] = df
-
+    
+    # Quit browser once scraping is done
     driver.quit()
     return out
 
 # Main driver
 def main():
-    ensure_dir(master_out)
+    master_out.parent.mkdir(parents=True, exist_ok=True)
     print("Scraping CapWages")
+    
+    # Use Selenium to open CapWages site and scrape signing data from each page
     cw_raw = scrape_capwages(start_year, end_year)
     master = pd.DataFrame(columns=target_columns)
+    
+    # For each scraped season, ensure column labels line up with PuckPedia names (so when I fix PuckPedia later I don't have to re-fix schema here)
+    # Also deduplicate contracts using a player/team/term/starting season key so contracts don't get double counted if they already exist
     for label, source_df in cw_raw.items():
         full_label = expand_season_label(label)
         cw_df = harmonize_capwages_df(source_df, full_label)

@@ -27,7 +27,7 @@ def parse_start_year_series(s):
     yrs = s.str.extract(r'^\s*(\d{4})', expand=False)
     return pd.to_numeric(yrs, errors='coerce').astype('Int64')
 
-# RAPM Histogram
+# RAPM Histogram distribution by position
 def fig_rapm_histograms():
     df = pd.read_csv(rapm_es_csv, low_memory=False)
     off = pd.to_numeric(df["off_xGF60_raw"], errors="coerce")

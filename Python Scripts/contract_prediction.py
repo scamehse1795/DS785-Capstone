@@ -24,12 +24,14 @@ out_dir = clean_dir / season_str
 contracts_master_path = clean_dir / "NHL_CONTRACTS_MASTER.csv"
 age_curve_path = clean_dir / "AGE_CURVE_GAR_BY_AGE.csv"
 
+# K-nearest-neighbors config values
 k_neighbors = 100
 k_min_per_term = 5
 distance_scale = 0.85
 kernel_power = 0.85
 block_weights = {"USAGE":2.0, "IMPACT":1.2, "VALUE":1.5, "AGE":2.0, "DEMO":0.6, "CTX":1.2}
 
+# EvolvingHockey Ridge model blend weights
 evolv_hockey_blend_base = 0.50
 evolv_hockey_blend_strong = 0.80
 evolv_hockey_blend_cap = 0.75
@@ -99,13 +101,14 @@ def season_str_from_year(y):
 def broad_pos_from_posbucket(pb):
     return "D" if str(pb).upper()=="D" else "F"
 
+# Role tiers are based on industry language; maps role tiers to numeric values
 def map_role_tier(posbucket, rolebucket):
     p = str(posbucket).strip()
     r = str(rolebucket).strip()
     if p == "F":
-        return {"1st Line":5,"Top-6":4,"Middle-6":3,"Bottom-6":2,"4th Line":1,"Other":0}.get(r, 0)
+        return {"1st Line":5, "Top-6":4, "Middle-6":3, "Bottom-6":2, "4th Line":1, "Other":0}.get(r, 0)
     if p == "D":
-        return {"1st Pair":5,"Top-4":4,"Bottom-4":2,"3rd Pair":1,"Other":0}.get(r, 0)
+        return {"1st Pair":5, "Top-4":4, "Bottom-4":2, "3rd Pair":1, "Other":0}.get(r, 0)
     return 0
 
 def age_band(a):
@@ -120,8 +123,8 @@ def age_band(a):
     return "35+"
 
 def kernel_similarity(dist, distance_scale, kernel_power):
-    s = np.exp(-distance_scale * np.maximum(dist, 0.0))
-    return s if kernel_power is None else np.power(s, kernel_power)
+    similarity_raw = np.exp(-distance_scale * np.maximum(dist, 0.0))
+    return similarity_raw if kernel_power is None else np.power(similarity_raw, kernel_power)
 
 def ensure_engineered_columns(df):
     df = df.copy()
@@ -136,6 +139,7 @@ def ensure_meta_cols(df, cols):
             out[c] = np.nan
     return out
 
+# Load contact data and make sure columns are standardized
 def load_contracts(path):
     df = pd.read_csv(path, low_memory=False)
     req = ["Skaters","Pos","Shot","W(lbs)","H(f)","Length","Level",
@@ -170,10 +174,11 @@ def load_contracts(path):
     out["age_band"] = out["Signing_Age"].apply(age_band)
     return out
 
+# Load GAR values for given year
 def load_gar_for_year(clean_dir, stats_year):
     season = season_str_from_year(stats_year)
     fpath = clean_dir / season / f"Skater_GAR_WAR_{season}.csv"
-    g = pd.read_csv(fpath, low_memory=False)
+    gar_df = pd.read_csv(fpath, low_memory=False)
 
     keep = [
         "Player","PlayerID","PosBucket","RoleBucket",
@@ -182,35 +187,36 @@ def load_gar_for_year(clean_dir, stats_year):
         "ES_xGF60_blend","ES_xGA60_blend",
         "ES_xGF60_shr","ES_xGA60_shr","Team"
         ]
-    have = [c for c in keep if c in g.columns]
-    g = g[have].copy()
+    have = [c for c in keep if c in gar_df.columns]
+    gar_df = gar_df[have].copy()
 
-    g["playerId"] = pd.to_numeric(g.get("PlayerID"), errors="coerce").astype("Int64")
-    g["Stats_Year"] = int(stats_year)
+    gar_df["playerId"] = pd.to_numeric(gar_df.get("PlayerID"), errors="coerce").astype("Int64")
+    gar_df["Stats_Year"] = int(stats_year)
 
     for c in ["GP","TOI_EV","TOI_PP","TOI_PK","TOI_all","GAR_total","WAR","SPAR",
               "ES_xGF60_blend","ES_xGA60_blend","ES_xGF60_shr","ES_xGA60_shr"]:
-        if c in g.columns: 
-            g[c] = pd.to_numeric(g[c], errors="coerce")
+        if c in gar_df.columns: 
+            gar_df[c] = pd.to_numeric(gar_df[c], errors="coerce")
 
-    toi_all = g["TOI_all"].replace(0, np.nan)
-    g["PP_share"] = g["TOI_PP"] / toi_all
-    g["PK_share"] = g["TOI_PK"] / toi_all
-    g["TOI_total"] = g["TOI_all"] / 60.0
+    toi_all = gar_df["TOI_all"].replace(0, np.nan)
+    gar_df["PP_share"] = gar_df["TOI_PP"] / toi_all
+    gar_df["PK_share"] = gar_df["TOI_PK"] / toi_all
+    gar_df["TOI_total"] = gar_df["TOI_all"] / 60.0
 
-    if "ES_xGF60_blend" in g.columns and "ES_xGA60_blend" in g.columns:
-        g["xGF_per60_ES"] = g["ES_xGF60_blend"] 
-        g["xGA_per60_ES"] = g["ES_xGA60_blend"]
-    elif "ES_xGF60_shr" in g.columns and "ES_xGA60_shr" in g.columns:
-        g["xGF_per60_ES"] = g["ES_xGF60_shr"]
-        g["xGA_per60_ES"] = g["ES_xGA60_shr"]
+    if "ES_xGF60_blend" in gar_df.columns and "ES_xGA60_blend" in gar_df.columns:
+        gar_df["xGF_per60_ES"] = gar_df["ES_xGF60_blend"] 
+        gar_df["xGA_per60_ES"] = gar_df["ES_xGA60_blend"]
+    elif "ES_xGF60_shr" in gar_df.columns and "ES_xGA60_shr" in gar_df.columns:
+        gar_df["xGF_per60_ES"] = gar_df["ES_xGF60_shr"]
+        gar_df["xGA_per60_ES"] = gar_df["ES_xGA60_shr"]
 
-    g["role_tier"] = g.apply(lambda r: map_role_tier(r.get("PosBucket",""), r.get("RoleBucket","")), axis=1)
-    if "Team" not in g.columns: 
-        g["Team"] = ""
-    g["TOI_all_value"] = g["TOI_all"]
-    return g
+    gar_df["role_tier"] = gar_df.apply(lambda r: map_role_tier(r.get("PosBucket",""), r.get("RoleBucket","")), axis=1)
+    if "Team" not in gar_df.columns: 
+        gar_df["Team"] = ""
+    gar_df["TOI_all_value"] = gar_df["TOI_all"]
+    return gar_df
 
+# Loop over a range of seasons and stacks the per-year GAR files into a "bank" of GAR values
 def build_prev_season_bank(clean_dir, start_min, start_max):
     frames = []
     for year in range(start_min, start_max+1):
@@ -219,9 +225,10 @@ def build_prev_season_bank(clean_dir, start_min, start_max):
             frames.append(season_df)
     return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
 
+# Read in age curve file and normalize labels/column names
 def load_age_curve(path):
-    ac_raw = pd.read_csv(path, low_memory=False)
-    cols_lower = {c.lower(): c for c in ac_raw.columns}
+    age_curve_raw = pd.read_csv(path, low_memory=False)
+    cols_lower = {c.lower(): c for c in age_curve_raw.columns}
     def pick(*cands):
         for c in cands:
             if c in cols_lower: 
@@ -238,115 +245,123 @@ def load_age_curve(path):
                 ("avg", col_avg), ("lower", col_lo), ("upper", col_hi)]
                if col is None]
     if missing:
-        raise RuntimeError("[FATAL] age curve missing columns: " + ", ".join(missing))
+        raise RuntimeError("Age curve missing columns: " + ", ".join(missing))
 
-    def norm_pos(v):
-        if pd.isna(v): 
+    def norm_pos(raw_pos):
+        if pd.isna(raw_pos): 
             return np.nan
-        s = str(v).strip().upper()
-        if s in {"F","FORWARD","FORWARDS","C","L","R","W","LW","RW"}: 
+        pos_str = str(raw_pos).strip().upper()
+        if pos_str in {"F","C","L","R","W","LW","RW"}: 
             return "F"
-        if s in {"D","DEFENSE","DEFENCE","DEFENSEMAN","DEFENSEMEN"}: 
+        if pos_str in {"D","LD", "RD"}: 
             return "D"
         return "F"
 
-    ac = (ac_raw.rename(columns={
+    age_curve = (age_curve_raw.rename(columns={
             col_pos:"posBucket", col_age:"age", col_avg:"avg", col_lo:"lower", col_hi:"upper"})
           [["posBucket","age","avg","lower","upper"]].copy())
-    ac["posBucket"] = ac["posBucket"].apply(norm_pos)
-    for c in ["age","avg","lower","upper"]: ac[c] = pd.to_numeric(ac[c], errors="coerce")
-    return ac.dropna(subset=["posBucket","age","avg"]).sort_values(["posBucket","age"]).reset_index(drop=True)
+    age_curve["posBucket"] = age_curve["posBucket"].apply(norm_pos)
+    for c in ["age","avg","lower","upper"]: 
+        age_curve[c] = pd.to_numeric(age_curve[c], errors="coerce")
+    return age_curve.dropna(subset=["posBucket","age","avg"]).sort_values(["posBucket","age"]).reset_index(drop=True)
 
-def solid_tail_step(val_m, val_lo, val_hi, tail_rm, tail_rlo, tail_rhi):
-    def tail_ratio(r):
+# Apply ratios after ages in curve to prevent extreme growth/decline in older ages
+def solid_tail_step(current_mean, current_low, current_high, tail_ratio_mean, tail_ratio_low, tail_ratio_high):
+    def tail_ratio(raw_ratio):
         try:
-            r = float(r)
+            raw_ratio = float(raw_ratio)
         except Exception:
             return 1.0
-        if r <= 0.0:
+        if raw_ratio <= 0.0:
             return 1.0
-        r_tail = r ** tail_decay_mult
-        return max(0.3, min(0.95, r_tail))
+        decay_ratio = raw_ratio ** tail_decay_mult
+        return max(0.3, min(0.95, decay_ratio))
 
-    rm = tail_ratio(tail_rm)
-    rlo = tail_ratio(tail_rlo)
-    rhi = tail_ratio(tail_rhi)
-    new_m = val_m * rm
-    new_lo = val_lo * rlo
-    new_hi = val_hi * rhi
+    ratio_mean_decay = tail_ratio(tail_ratio_mean)
+    ratio_low_decay = tail_ratio(tail_ratio_low)
+    ratio_high_decay = tail_ratio(tail_ratio_high)
+    new_mean = current_mean * ratio_mean_decay
+    new_low = current_low * ratio_low_decay
+    new_high = current_high * ratio_high_decay
 
-    return new_m, new_lo, new_hi
+    return new_mean, new_low, new_high
 
-def three_year_gar_baseline(g1, g2, g3):
-    vals, wts = [], []
-    for w, g in [(baseline_with_last, g1), (baseline_with_M1, g2), (baseline_with_M2, g3)]:
+# Builds a baseline GAR estimate per player by taking a weighted average of the last three seasons of GAR, weighting most recent years more heavily
+def three_year_gar_baseline(gar_last, gar_minus1, gar_minus2):
+    gar_values = [] 
+    gar_weights = []
+    for w, g in [(baseline_with_last, gar_last), (baseline_with_M1, gar_minus1), (baseline_with_M2, gar_minus2)]:
         if not pd.isna(g):
-            vals.append(float(g))
-            wts.append(float(w))
-    if not wts:
+            gar_values.append(float(g))
+            gar_weights.append(float(w))
+    if not gar_weights:
         return np.nan
-    return float(np.average(vals, weights=wts))
+    return float(np.average(gar_values, weights=gar_weights))
 
-def build_ratio_tables(ac):
+# For each position, convert the age curve into year-over-year multiplicative ratios
+def build_ratio_tables(age_curve):
     tables = {}
-    for pb, g in ac.groupby("posBucket"):
-        gg = g.sort_values("age").reset_index(drop=True)
-        ages = gg["age"].astype(int).tolist()
-        m = gg["avg"].astype(float).tolist()
-        lo = gg["lower"].astype(float).tolist()
-        hi = gg["upper"].astype(float).tolist()
-        r_m = [m[i+1] / m[i] for i in range(len(m) - 1)]
-        r_lo = [lo[i+1] / lo[i] for i in range(len(lo) - 1)]
-        r_hi = [hi[i+1] / hi[i] for i in range(len(hi) - 1)]
+    for posbucket, group_df in age_curve.groupby("posBucket"):
+        group_sorted = group_df.sort_values("age").reset_index(drop=True)
+        ages = group_sorted["age"].astype(int).tolist()
+        mean_gar = group_sorted["avg"].astype(float).tolist()
+        lower_gar = group_sorted["lower"].astype(float).tolist()
+        upper_gar = group_sorted["upper"].astype(float).tolist()
+        ratios_mean = [mean_gar[i+1] / mean_gar[i] for i in range(len(mean_gar) - 1)]
+        ratios_low = [lower_gar[i+1] / lower_gar[i] for i in range(len(lower_gar) - 1)]
+        ratios_high = [upper_gar[i+1] / upper_gar[i] for i in range(len(upper_gar) - 1)]
 
-        if len(r_m):
-            tail_rm = r_m[-1]
+        if len(ratios_mean):
+            tail_mean_ratio = ratios_mean[-1]
         else:
-            tail_rm = 1.0
-        if len(r_lo):
-            tail_rlo = r_lo[-1]
+            tail_mean_ratio = 1.0
+        if len(ratios_low):
+            tail_low_ratio = ratios_low[-1]
         else:
-            tail_rlo = tail_rm
-        if len(r_hi):
-            tail_rhi = r_hi[-1]
+            tail_low_ratio = tail_mean_ratio
+        if len(ratios_high):
+            tail_high_ratio = ratios_high[-1]
         else:
-            tail_rhi = tail_rm
+            tail_high_ratio = tail_mean_ratio
 
-        tables[str(pb)] = {
+        tables[str(posbucket)] = {
             "ages": ages,
-            "m": m,
-            "lo": lo,
-            "hi": hi,
-            "r_m": r_m,
-            "r_lo": r_lo,
-            "r_hi": r_hi,
+            "mean_gar": mean_gar,
+            "lower_gar": lower_gar,
+            "upper_gar": upper_gar,
+            "ratios_mean": ratios_mean,
+            "ratios_low": ratios_low,
+            "ratios_high": ratios_high,
             "max_age": max(ages),
-            "tail_rm": tail_rm,
-            "tail_rlo": tail_rlo,
-            "tail_rhi": tail_rhi,
+            "tail_mean_ratio": tail_mean_ratio,
+            "tail_low_ratio": tail_low_ratio,
+            "tail_high_ratio": tail_high_ratio,
             }
     return tables
 
-def project_gar_series(posbucket, age0, base_t, ratio_tbl, horizon=9):
-    tb = ratio_tbl.get(str(posbucket), None)
-    if tb is None or pd.isna(base_t):
+# Given a starting age and baseline GAR, uses the age-curve ratios (and a linear tail if GAR gets very small) to project total GAR for up to N future seasons (default is 9)
+def project_gar_series(posbucket, starting_age, baseline_gar, position_ratio_tables, horizon=9):
+    pos_ratio_table = position_ratio_tables.get(str(posbucket), None)
+    if pos_ratio_table is None or pd.isna(baseline_gar):
         return {}, {}
 
-    base_t = float(base_t)
+    baseline_gar = float(baseline_gar)
 
-    ages = tb["ages"]
-    r_m = tb["r_m"]
-    r_lo = tb.get("r_lo", [])
-    r_hi = tb.get("r_hi", [])
-    tail_rm = tb["tail_rm"]
-    tail_rlo = tb["tail_rlo"]
-    tail_rhi = tb["tail_rhi"]
+    curve_ages = pos_ratio_table["curve_ages"]
+    ratios_mean = pos_ratio_table["ratios_mean"]
+    ratios_low = pos_ratio_table.get("ratios_low", [])
+    ratios_high = pos_ratio_table.get("ratios_high", [])
+    tail_mean_ratio = pos_ratio_table["tail_mean_ratio"]
+    tail_low_ratio = pos_ratio_table["tail_low_ratio"]
+    tail_high_ratio = pos_ratio_table["tail_high_ratio"]
 
-    out, out_lo, out_hi = {}, {}, {}
-    cur_m = base_t
-    cur_lo = base_t
-    cur_hi = base_t
-    a_now = int(round(age0))
+    proj_mean_dict = {}
+    proj_low_dict = {} 
+    proj_high_dic = {}
+    current_mean = baseline_gar
+    current_low = baseline_gar
+    current_high = baseline_gar
+    current_age = int(round(starting_age))
 
     mode = "curve" # "curve" = use age ratios; "linear" = subtractive
     linear_step = 0.0
@@ -361,56 +376,58 @@ def project_gar_series(posbucket, age0, base_t, ratio_tbl, horizon=9):
         # Clamp to avoid wild jumps even if the curve is noisy
         return min(1.15, max(0.6, r))
 
-    for k in range(1, horizon + 1):
-        a_from = a_now
-        prev_m, prev_lo, prev_hi = cur_m, cur_lo, cur_hi
+    for year_offset in range(1, horizon + 1):
+        age_this_year = current_age
+        prev_mean = current_mean
+        prev_low = current_low
+        prev_high = current_high
 
-        # If in curve mode and GAR has dropped below the linear 
-        # switch threshold, switch to linear decay.
-        if mode == "curve" and prev_m < linear_switch_GAR:
-            remaining_steps = horizon - (k - 1)
-            if remaining_steps <= 0:
-                remaining_steps = 1 # avoid divide-by-zero
-            linear_step = prev_m / remaining_steps
+        # If in curve mode and GAR has dropped below the linear switch threshold, switch to linear decay.
+        if mode == "curve" and prev_mean < linear_switch_GAR:
+            remaining_years = horizon - (year_offset - 1)
+            if remaining_years <= 0:
+                remaining_years = 1 # avoid divide-by-zero
+            linear_step = prev_mean / remaining_years
             mode = "linear"
 
         if mode == "linear":
             # Subtractive decay: same step every year, goes to 0 at horizon
-            cur_m = prev_m - linear_step
-            cur_lo = prev_lo - linear_step
-            cur_hi = prev_hi - linear_step
+            current_mean = prev_mean - linear_step
+            current_low = prev_low - linear_step
+            current_high = prev_high - linear_step
         else:
             # Age-curve multiplicative step
-            if a_from in ages:
-                idx = ages.index(a_from)
-                if idx < len(r_m):
-                    ratio_m = clean_ratio(r_m[idx])
-                    ratio_lo = clean_ratio(r_lo[idx]) if idx < len(r_lo) else ratio_m
-                    ratio_hi = clean_ratio(r_hi[idx]) if idx < len(r_hi) else ratio_m
-                    cur_m = prev_m * ratio_m
-                    cur_lo = prev_lo * ratio_lo
-                    cur_hi = prev_hi * ratio_hi
+            if age_this_year in curve_ages:
+                idx = curve_ages.index(age_this_year)
+                if idx < len(ratios_mean):
+                    ratio_m = clean_ratio(ratios_mean[idx])
+                    ratio_lo = clean_ratio(ratios_low[idx]) if idx < len(ratios_low) else ratio_m
+                    ratio_hi = clean_ratio(ratios_high[idx]) if idx < len(ratios_high) else ratio_m
+                    current_mean = prev_mean * ratio_m
+                    current_low = prev_low * ratio_lo
+                    current_high = prev_high * ratio_hi
                 else:
-                    cur_m, cur_lo, cur_hi = solid_tail_step(
-                        prev_m, prev_lo, prev_hi,
-                        tail_rm, tail_rlo, tail_rhi,
+                    current_mean, current_low, current_high = solid_tail_step(
+                        prev_mean, prev_low, prev_high,
+                        tail_mean_ratio, tail_low_ratio, tail_high_ratio,
                         )
             else:
-                cur_m, cur_lo, cur_hi = solid_tail_step(
-                    prev_m, prev_lo, prev_hi,
-                    tail_rm, tail_rlo, tail_rhi,
+                current_mean, current_low, current_high = solid_tail_step(
+                    prev_mean, prev_low, prev_high,
+                    tail_mean_ratio, tail_low_ratio, tail_high_ratio,
                     )
 
-        out[f"proj_age_year{k}"] = a_from + 1
-        out[f"proj_GAR_total_year{k}"] = cur_m
-        out_lo[f"proj_GAR_total_low_year{k}"] = cur_lo
-        out_hi[f"proj_GAR_total_high_year{k}"] = cur_hi
-        a_now = a_from + 1
+        proj_mean_dict[f"proj_age_year{year_offset}"] = age_this_year + 1
+        proj_mean_dict[f"proj_GAR_total_year{year_offset}"] = current_mean
+        proj_low_dict[f"proj_GAR_total_low_year{year_offset}"] = current_low
+        proj_high_dic[f"proj_GAR_total_high_year{year_offset}"] = current_high
+        current_age = age_this_year + 1
 
-    out.update(out_lo)
-    out.update(out_hi)
-    return out, {"age0": int(round(age0)), "base_GAR3": base_t}
+    proj_mean_dict.update(proj_low_dict)
+    proj_mean_dict.update(proj_high_dic)
+    return proj_mean_dict, {"starting_age": int(round(starting_age)), "base_GAR3": baseline_gar}
 
+# Era labels for future contract learning on how contract values shift based on era
 def cap_era_label_from_year(y):
     y = int(y)
     if 2015 <= y <= 2020: 
@@ -426,18 +443,29 @@ def cap_era_label_from_year(y):
     return "Unknown"
 
 def build_training_master(contracts_all, gar_bank):
+    # Tag each contract with a simple cap-era bucket for context and drop ELCs
     contracts_all = contracts_all.copy()
     contracts_all["cap_era"] = contracts_all["Start_Year"].apply(cap_era_label_from_year)
     contracts_all = contracts_all.loc[contracts_all["level_clean"] != "ELC"].copy()
+    
+    # Grab demographic row from latest contract for each player
     rows = []
     last_demo = (contracts_all.sort_values(["playerId", "Start_Year"]).groupby("playerId").tail(1)[["playerId", "Shot", "Weight_lb", "Height_in", "Signing_Age"]]).set_index("playerId")
 
+    # Iterate contract rows and attach prior-year GAR/WAR and usage
     for row in contracts_all.itertuples(index=False):
         pid, syear = row.playerId, row.Start_Year
-        if pd.isna(pid) or pd.isna(syear): continue
+        # Skip rows without playerIds (players that signed contracts but have no NHL stats)
+        if pd.isna(pid) or pd.isna(syear): 
+            continue
+        
+        # Pull prior season GAR/WAR rows
         prev = gar_bank.loc[(gar_bank["playerId"]==pid) & (gar_bank["Stats_Year"]==(int(syear)-1))]
-        if len(prev)==0: continue
+        if len(prev)==0: 
+            continue
         p2 = prev.sort_values("TOI_all", ascending=False).head(1).iloc[0]
+        
+        # Grab contract demographics
         shot_val = row.Shot
         wt_val = row.Weight_lb
         ht_val = row.Height_in
@@ -452,7 +480,8 @@ def build_training_master(contracts_all, gar_bank):
                 shot_val = dd.get("Shot", "")
             if pd.isna(sa_val):
                 sa_val = dd.get("Signing_Age", np.nan)
-
+                
+        # Build the combined contract + prior-value row
         rows.append({
             "playerId": pid, "PlayerName": row.Skaters, "Pos": row.Pos,
             "Shot": shot_val, "Weight_lb": wt_val, "Height_in": ht_val,
@@ -476,9 +505,11 @@ def build_training_master(contracts_all, gar_bank):
 
     tm = pd.DataFrame(rows)
     if len(tm):
+        # Prefer higher TOI rows when deduplicating
         tm = (tm.sort_values(["playerId","Start_Year","TOI_all_value"], ascending=[True, True, False]).drop_duplicates(subset=["playerId","Start_Year"], keep="first").copy())
     return tm
 
+# Attach GAR projections and 3-year baseline
 def attach_gar_projections(df_rows, gar_bank, ratio_tables, horizon=9):
     g_by_pid = gar_bank.sort_values(["playerId","Stats_Year"]).groupby("playerId")
     out_rows = []
@@ -486,12 +517,16 @@ def attach_gar_projections(df_rows, gar_bank, ratio_tables, horizon=9):
     for row in df_rows.itertuples(index=False):
         pid, syear, signing_age = row.playerId, int(row.Start_Year), row.Signing_Age
         stats_year = syear - 1
+        
+        # Can't project without signing age or playerId
         if pd.isna(signing_age) or pd.isna(pid):
             out_rows.append({"playerId": pid, "Start_Year": syear})
             continue
 
-        base_t = np.nan
-        pos_base = "F"
+        base_t = np.nan # 3-year baseline
+        pos_base = "F" # default to forwards if no position can be infered
+        
+        # Compute 3-year baseline for player (using only immediately preceeding seasons)
         if pid in g_by_pid.groups:
             gar_grp = g_by_pid.get_group(pid)
             gar_grp = gar_grp[gar_grp["Stats_Year"] <= stats_year]
@@ -502,13 +537,15 @@ def attach_gar_projections(df_rows, gar_bank, ratio_tables, horizon=9):
                 while len(vals) < 3: 
                     vals.insert(0, np.nan)
                     toiv.insert(0, np.nan)
+                # Weighted 3-year GAR baseline (heavier weight on the most recent season)
                 base_t = three_year_gar_baseline(vals[-1], vals[-2], vals[-3])
                 pos_base = last3.iloc[-1].get("PosBucket","F")
 
         if pd.isna(base_t):
             out_rows.append({"playerId": pid, "Start_Year": syear})
             continue
-
+        
+        # Project future GAR using age curve ratios and a linear tail if needed
         proj, _ = project_gar_series(broad_pos_from_posbucket(pos_base), int(round(signing_age)), float(base_t), ratio_tables, horizon=horizon)
         row = {"playerId": pid, "Start_Year": syear, "baseline_Tstar": base_t}
         row.update(proj)
@@ -516,11 +553,13 @@ def attach_gar_projections(df_rows, gar_bank, ratio_tables, horizon=9):
 
     proj_df = pd.DataFrame(out_rows)
     if len(proj_df):
+        # For each possible term length, sum the projected GAR values
         for t in range(1, 9):
             cols = [f"proj_GAR_total_year{k}" for k in range(1, t+1) if f"proj_GAR_total_year{k}" in proj_df.columns]
             proj_df[f"ProjValue_term{t}"] = proj_df[cols].sum(axis=1, skipna=True) if cols else np.nan
     return df_rows.merge(proj_df, on=["playerId","Start_Year"], how="left")
 
+# Add context columns (status_group, level, clauses, cap era, age band, position bucket, role bucket)
 def add_context_onehots(train_df, target_df):
     target_df = target_df.copy()
     train_df = train_df.copy()
@@ -546,78 +585,88 @@ def get_block_defs(target_df):
         }
     return block_defs
 
+# Fit a StandardScaler on rows with complete data in each feature block, and compute a covariance matrix and its inverse (for Mahalanobis distance)
 def fit_block_scalers_and_covs(train_df, block_cols):
     train_df = ensure_engineered_columns(train_df.copy())
-    scalers, inv_covs, used_cols = {}, {}, {}
+    scalers = {}
+    inv_covs = {}
+    used_cols = {}
 
-    for bname, cols in block_cols.items():
+    for block_name, cols in block_cols.items():
         use = [c for c in cols if c in train_df.columns]
-        used_cols[bname] = use
+        used_cols[block_name] = use
         if len(use) == 0:
-            scalers[bname] = None 
-            inv_covs[bname] = None
+            scalers[block_name] = None 
+            inv_covs[block_name] = None
             continue
-        sub = train_df[use].astype(float) 
-        mask = ~sub.isna().any(axis=1) 
-        X = sub[mask].to_numpy()
-        if X.shape[0] == 0: 
-            scalers[bname] = None
-            inv_covs[bname] = None
+        block_data = train_df[use].astype(float) 
+        mask = ~block_data.isna().any(axis=1) 
+        numeric_block_values = block_data[mask].to_numpy()
+        if numeric_block_values.shape[0] == 0: 
+            scalers[block_name] = None
+            inv_covs[block_name] = None
             continue
-        sc = StandardScaler() 
-        sc.fit(X) 
-        scalers[bname] = sc
+        
+        # Standardize each block
+        block_scaler = StandardScaler() 
+        block_scaler.fit(numeric_block_values) 
+        scalers[block_name] = block_scaler
 
-        if bname != "CTX" and X.shape[0] >= 3 and X.shape[1] >= 2:
-            Z = sc.transform(X) 
-            cov = np.cov(Z, rowvar=False)
-            cov = cov + 1e-6 * np.eye(cov.shape[0])
+        # Use Mahalanobis distance for deature blocks (except CTX due to high-dimensional sparcity; fall back to Euclidean)
+        if block_name != "CTX" and numeric_block_values.shape[0] >= 3 and numeric_block_values.shape[1] >= 2:
+            standardized_block_values = block_scaler.transform(numeric_block_values) 
+            block_covariance = np.block_covariance(standardized_block_values, rowvar=False)
+            block_covariance = block_covariance + 1e-6 * np.eye(block_covariance.shape[0])
             try: 
-                inv_covs[bname] = np.linalg.inv(cov)
+                inv_covs[block_name] = np.linalg.inv(block_covariance)
             except Exception: 
-                inv_covs[bname] = None
+                inv_covs[block_name] = None
         else:
-            inv_covs[bname] = None
+            inv_covs[block_name] = None
     return scalers, inv_covs, used_cols
 
 def build_block_arrays(df, used_cols, scalers):
     df = ensure_engineered_columns(df.copy())
-    arrays, valid = {}, {}
-    for bname, use in used_cols.items():
+    arrays = {}
+    valid = {}
+    for block_name, use in used_cols.items():
         if len(use) == 0:
-            arrays[bname] = np.zeros((len(df), 0))
-            valid[bname] = np.zeros(len(df), dtype=bool) 
+            arrays[block_name] = np.zeros((len(df), 0))
+            valid[block_name] = np.zeros(len(df), dtype=bool) 
             continue
-        sub = df[use].astype(float)
-        mask = ~sub.isna().any(axis=1)
-        arr = np.full((len(df), len(use)), np.nan)
-        sc = scalers.get(bname, None)
-        if sc is not None and mask.any(): 
-            arr[mask, :] = sc.transform(sub[mask].to_numpy())
-        arrays[bname] = np.where(np.isnan(arr), 0.0, arr) 
-        valid[bname] = mask.to_numpy()
+        block_data = df[use].astype(float)
+        mask = ~block_data.isna().any(axis=1)
+        block_array = np.full((len(df), len(use)), np.nan)
+        block_scaler = scalers.get(block_name, None)
+        if block_scaler is not None and mask.any(): 
+            block_array[mask, :] = block_scaler.transform(block_data[mask].to_numpy())
+        
+        # Replace NaNs with zeros
+        arrays[block_name] = np.where(np.isnan(block_array), 0.0, block_array) 
+        valid[block_name] = mask.to_numpy()
     return arrays, valid
 
-def blockwise_distance(idx_t, idx_cands, targ_arrays, train_arrays, targ_valid, train_valid, inv_covs, block_weights):
+# Compute a weighted sum of per-block distances between a single target row and a set of candidate training rows using Mahalanobis Distance (if possible, otherwise Euclidean)
+def blockwise_distance(target_index, candidate_indices, targ_arrays, train_arrays, targ_valid, train_valid, block_inv_covariances, block_weights):
     total = None
-    for bname, w in block_weights.items():
-        Xt = targ_arrays[bname][idx_t:idx_t+1, :]
-        Xc = train_arrays[bname][idx_cands, :]
-        vt = targ_valid[bname][idx_t]
-        vc = train_valid[bname][idx_cands]
-        if Xc.shape[1] == 0:
-            d = np.zeros(len(idx_cands))
+    for block_name, block_weight in block_weights.items():
+        target_block_row = targ_arrays[block_name][target_index:target_index+1, :]
+        candidate_block_rows = train_arrays[block_name][candidate_indices, :]
+        target_block_has_data = targ_valid[block_name][target_index]
+        candidate_block_has_data = train_valid[block_name][candidate_indices]
+        if candidate_block_rows.shape[1] == 0:
+            block_distance_contrib = np.zeros(len(candidate_indices))
         else:
-            usable = vt & vc
-            if bname == "CTX" or inv_covs.get(bname, None) is None:
-                diff = Xc - Xt
-                d_all = np.sqrt(np.sum(diff * diff, axis=1))
+            usable = target_block_has_data & candidate_block_has_data
+            if block_name == "CTX" or block_inv_covariances.get(block_name, None) is None:
+                diff = candidate_block_rows - target_block_row
+                block_distances = np.sqrt(np.sum(diff * diff, axis=1))
             else:
-                VI = inv_covs[bname]
-                diff = Xc - Xt
-                d_all = np.sqrt(np.sum(diff.dot(VI) * diff, axis=1))
-            d = np.where(usable, d_all, 0.0)
-        comp = w * d
+                block_inv_cov = block_inv_covariances[block_name]
+                diff = candidate_block_rows - target_block_row
+                block_distances = np.sqrt(np.sum(diff.dot(block_inv_cov) * diff, axis=1))
+            block_distance_contrib = np.where(usable, block_distances, 0.0)
+        comp = block_weight * block_distance_contrib
         total = comp if total is None else total + comp
     return total
 
@@ -631,194 +680,214 @@ def build_term_model_matrix(df):
         ]
     ctx = [c for c in df.columns if c.startswith(("sg_","lvl_","cl_","era_","ab_","pos_","role_"))]
     cols = [c for c in base if c in df.columns] + ctx
-    X = df[cols].copy()
-    for c in X.columns:
-        if pd.api.types.is_numeric_dtype(X[c]): 
-            X[c] = pd.to_numeric(X[c], errors="coerce").fillna(0.0)
+    feature_matrix = df[cols].copy()
+    # Ensure numeric columns are numeric, and fill missing values with 0
+    for c in feature_matrix.columns:
+        if pd.api.types.is_numeric_dtype(feature_matrix[c]): 
+            feature_matrix[c] = pd.to_numeric(feature_matrix[c], errors="coerce").fillna(0.0)
         else:
-            s = X[c].astype(object) 
-            X[c] = s.where(s.notna(), "")
-    return X, cols
+            s = feature_matrix[c].astype(object) 
+            feature_matrix[c] = s.where(s.notna(), "")
+    return feature_matrix, cols
 
 def fit_term_models(train_df, valid_terms, alpha=2.0):
-    models, meta = {}, {}
-    for t in valid_terms:
-        sub = train_df.loc[(train_df["Length"].astype("Int64") == t) & train_df["Start_Yr_Cap_Pct"].notna()].copy()
-        if not len(sub):
-            models[t] = None
-            meta[t] = {"n": 0, "cols": []}
+    models = {}
+    meta = {}
+    for term_length in valid_terms:
+        # Only include contracts that actually have this term length and a known cap %
+        term_train_df = train_df.loc[(train_df["Length"].astype("Int64") == term_length) & train_df["Start_Yr_Cap_Pct"].notna()].copy()
+        if not len(term_train_df):
+            models[term_length] = None
+            meta[term_length] = {"n": 0, "cols": []}
             continue
 
-        X, cols = build_term_model_matrix(sub)
-        y = pd.to_numeric(sub["Start_Yr_Cap_Pct"], errors="coerce").fillna(0.0).values
-        mdl = Ridge(alpha=float(alpha), fit_intercept=True, random_state=0)
-        mdl.fit(X, y)
-        models[t] = mdl
-        meta[t] = {"n": int(len(sub)), "cols": cols}
+        term_features, cols = build_term_model_matrix(term_train_df)
+        term_cap_pct = pd.to_numeric(term_train_df["Start_Yr_Cap_Pct"], errors="coerce").fillna(0.0).values
+        ridge_model = Ridge(alpha=float(alpha), fit_intercept=True, random_state=0)
+        ridge_model.fit(term_features, term_cap_pct)
+        models[term_length] = ridge_model
+        meta[term_length] = {"n": int(len(term_train_df)), "cols": cols}
 
     return models, meta
 
-
-def predict_term_model_cap_pct(row_df, t, model, meta):
+# Apply fitted per-term ridge
+def predict_term_model_cap_pct(row_df, term_length, model, meta):
     if model is None or not meta.get("cols"): 
         return np.nan
     cols = meta["cols"]
-    X = row_df.reindex(columns=cols, fill_value=0.0).copy()
-    for c in X.columns:
-        if pd.api.types.is_numeric_dtype(X[c]): 
-            X[c] = pd.to_numeric(X[c], errors="coerce").fillna(0.0)
+    row_features = row_df.reindex(columns=cols, fill_value=0.0).copy()
+    for c in row_features.columns:
+        if pd.api.types.is_numeric_dtype(row_features[c]): 
+            row_features[c] = pd.to_numeric(row_features[c], errors="coerce").fillna(0.0)
         else:
-            s = X[c].astype(object)
-            X[c] = s.where(s.notna(), "")
+            s = row_features[c].astype(object)
+            row_features[c] = s.where(s.notna(), "")
     try:
-        return float(model.predict(X)[0])
+        return float(model.predict(row_features)[0])
     except Exception:
         return np.nan
 
 def build_candidates(train_df, row, k):
     same_pos = (train_df["PosBucket"].astype(str) == str(row.get("PosBucket","")))
-    idx = np.where(same_pos.values)[0]
-    if idx.size < k: 
-        idx = np.arange(len(train_df))
-    return idx
+    candidate_indices = np.where(same_pos.values)[0]
+    if candidate_indices.size < k: 
+        candidate_indices = np.arange(len(train_df))
+    return candidate_indices
 
 def compute_knn_and_terms(train_df, target_df, block_weights, k_neighbors, distance_scale, kernel_power, kmin_per_term,
                           term_models, term_meta, eh_blend_base, eh_blend_strong, eh_blend_cap):
     valid_terms = list(range(1, 9))
-    tr, tg = add_context_onehots(train_df, target_df)
-    block_defs = get_block_defs(pd.concat([tr, tg], ignore_index=True, sort=False))
-    scalers, inv_covs, used_cols = fit_block_scalers_and_covs(tr, block_defs)
-    train_blk, train_valid = build_block_arrays(tr, used_cols, scalers)
-    targ_blk, targ_valid = build_block_arrays(tg, used_cols, scalers)
-    out_rows, comps_rows = [], []
+    
+    # Expand context and build feature blocks
+    train_with_context, target_with_context = add_context_onehots(train_df, target_df)
+    block_defs = get_block_defs(pd.concat([train_with_context, target_with_context], ignore_index=True, sort=False))
+    scalers, inv_covs, used_cols = fit_block_scalers_and_covs(train_with_context, block_defs)
+    train_blk, train_valid = build_block_arrays(train_with_context, used_cols, scalers)
+    targ_blk, targ_valid = build_block_arrays(target_with_context, used_cols, scalers)
+    out_rows = []
+    comps_rows = []
 
-    def block_meta_for_target(idx_t):
-        info = {}
-        for b in ["USAGE","IMPACT","VALUE","AGE","DEMO","CTX"]:
-            has_b = bool(targ_valid[b][idx_t])
-            ncols = int(len(used_cols.get(b, [])))
-            info[f"block_has_{b}"] = int(has_b)
-            info[f"block_cols_{b}"] = ncols
-            info[f"block_w_{b}"] = float(block_weights.get(b, 0.0))
-        return info
+    def block_meta_for_target(target_index):
+        block_meta = {}
+        for block_name in ["USAGE","IMPACT","VALUE","AGE","DEMO","CTX"]:
+            has_b = bool(targ_valid[block_name][target_index])
+            ncols = int(len(used_cols.get(block_name, [])))
+            block_meta[f"block_has_{block_name}"] = int(has_b)
+            block_meta[f"block_cols_{block_name}"] = ncols
+            block_meta[f"block_w_{block_name}"] = float(block_weights.get(block_name, 0.0))
+        return block_meta
 
-    for idx_t, row in tg.reset_index(drop=True).iterrows():
-        pid, sY = row.get("playerId", np.nan), row.get("Start_Year", np.nan)
-        idx_pool = build_candidates(tr, row, k_neighbors)
-        d = blockwise_distance(idx_t, idx_pool, targ_blk, train_blk, targ_valid, train_valid, inv_covs, block_weights)
-        take = min(k_neighbors, len(idx_pool))
-        order = np.argsort(d)[:take]
-        top_idx, d_top = idx_pool[order], d[order]
-        sim_kernel = kernel_similarity(d_top, distance_scale, kernel_power)
-        ssum = float(sim_kernel.sum())
-        if ssum > 0:
-            w_norm = sim_kernel / ssum
+    for target_index, row in target_with_context.reset_index(drop=True).iterrows():
+        target_player_id = row.get("playerId", np.nan)
+        start_year = row.get("Start_Year", np.nan)
+        
+        # Candidate pool: same-pos neighbors, with fallback to all train rows
+        candidate_indices = build_candidates(train_with_context, row, k_neighbors)
+        
+        # Full blockwise distance vector for target vs candidate pool and keep closest candidates
+        distances = blockwise_distance(target_index, candidate_indices, targ_blk, train_blk, targ_valid, train_valid, inv_covs, block_weights)
+        take = min(k_neighbors, len(candidate_indices))
+        sorted_indices = np.argsort(distances)[:take]
+        top_candidate_indices = candidate_indices[sorted_indices]
+        top_distances = distances[sorted_indices]
+        sim_kernel = kernel_similarity(top_distances, distance_scale, kernel_power)
+        kernel_sum = float(sim_kernel.sum())
+        if kernel_sum > 0:
+            normalized_kernel_weights = sim_kernel / kernel_sum
         else:
-            w_norm = np.ones_like(sim_kernel) / max(len(sim_kernel), 1)
+            normalized_kernel_weights = np.ones_like(sim_kernel) / max(len(sim_kernel), 1)
 
-        if len(d_top) == 0:
-            sim_pct = np.zeros_like(d_top, dtype=float)
+        # Produce a percentage similarity score (0–100) based on relative distances for dashboard
+        if len(top_distances) == 0:
+            sim_pct = np.zeros_like(top_distances, dtype=float)
         else:
-            d_top_safe = np.where(np.isfinite(d_top), d_top, np.nan)
-            if np.all(np.isnan(d_top_safe)):
-                sim_pct = np.zeros_like(d_top_safe, dtype=float)
+            distances_safe = np.where(np.isfinite(top_distances), top_distances, np.nan)
+            if np.all(np.isnan(distances_safe)):
+                sim_pct = np.zeros_like(distances_safe, dtype=float)
             else:
-                d_max = float(np.nanmax(d_top_safe))
-                if d_max <= 0.0:
-                    sim_pct = np.full_like(d_top_safe, 100.0, dtype=float)
+                max_distance = float(np.nanmax(distances_safe))
+                if max_distance <= 0.0:
+                    sim_pct = np.full_like(distances_safe, 100.0, dtype=float)
                 else:
-                    raw = 1.0 - (d_top_safe / d_max)
+                    raw = 1.0 - (distances_safe / max_distance)
                     raw = np.clip(raw, 0.0, 1.0)
                     sim_pct = 100.0 * raw
                     sim_pct = np.round(sim_pct).astype(float)
-
-        neigh = tr.iloc[top_idx].copy().reset_index(drop=True)
-        neigh["knn_dist"] = d_top
-        neigh["knn_sim"] = sim_kernel
-        neigh["knn_weight"] = w_norm
-        neigh["knn_sim_pct"] = sim_pct
-        cap_knn, iqr_knn, n_term, eff_n_term, cap_eh, w_model_term, cap_blend = {}, {}, {}, {}, {}, {}, {}
+        
+        # Build a neighbor DataFrame with distances and KNN weights
+        neighbor_df = train_with_context.iloc[top_candidate_indices].copy().reset_index(drop=True)
+        neighbor_df["knn_dist"] = top_distances
+        neighbor_df["knn_sim"] = sim_kernel
+        neighbor_df["knn_weight"] = normalized_kernel_weights
+        neighbor_df["knn_sim_pct"] = sim_pct
+        cap_pct_knn = {} 
+        cap_pct_iqr = {} 
+        neighbors_per_term = {} 
+        effective_neighbors_per_term = {} 
+        cap_pct_model = {} 
+        model_weight_per_term = {}
+        cap_pct_blend = {}
         row_X, _ = build_term_model_matrix(row.to_frame().T)
-        for t in valid_terms:
+        for term_length in valid_terms:
             # KNN stats
-            mask_t = neigh["Length"].astype("Int64").eq(t).values
-            n_t = int(mask_t.sum())
-            n_term[t] = n_t
-            if n_t == 0:
-                cap_knn[t] = np.nan
-                iqr_knn[t] = np.nan
-                eff_n_term[t] = np.nan
+            neighbors_term_mask = neighbor_df["Length"].astype("Int64").eq(term_length).values
+            neighbor_count_term = int(neighbors_term_mask.sum())
+            neighbors_per_term[term_length] = neighbor_count_term
+            if neighbor_count_term == 0:
+                cap_pct_knn[term_length] = np.nan
+                cap_pct_iqr[term_length] = np.nan
+                effective_neighbors_per_term[term_length] = np.nan
             else:
-                sub = neigh.loc[mask_t]
-                vals = pd.to_numeric(sub["Start_Yr_Cap_Pct"], errors="coerce")
-                wts = sub["knn_weight"].to_numpy()
-                if vals.notna().sum() == 0:
-                    cap_knn[t] = np.nan
-                    iqr_knn[t] = np.nan
-                    eff_n_term[t] = np.nan
+                neighbors_for_term = neighbor_df.loc[neighbors_term_mask]
+                neighbor_cap_values = pd.to_numeric(neighbors_for_term["Start_Yr_Cap_Pct"], errors="coerce")
+                neighbor_weights = neighbors_for_term["knn_weight"].to_numpy()
+                if neighbor_cap_values.notna().sum() == 0:
+                    cap_pct_knn[term_length] = np.nan
+                    cap_pct_iqr[term_length] = np.nan
+                    effective_neighbors_per_term[term_length] = np.nan
                 else:
-                    cap_knn[t] = float(np.nansum(vals.to_numpy()*wts) / max(np.nansum(wts), 1e-12))
-                    vclean = vals.dropna().to_numpy()
-                    iqr_knn[t] = float(np.quantile(vclean, 0.75) - np.quantile(vclean, 0.25)) if vclean.size >= 4 else np.nan
-                    wn = wts / max(wts.sum(), 1e-12)
-                    eff_n_term[t] = float(1.0 / max((wn**2).sum(), 1e-12))
+                    cap_pct_knn[term_length] = float(np.nansum(neighbor_cap_values.to_numpy()*neighbor_weights) / max(np.nansum(neighbor_weights), 1e-12))
+                    neighbor_cap_nonmissing = neighbor_cap_values.dropna().to_numpy()
+                    cap_pct_iqr[term_length] = float(np.quantile(neighbor_cap_nonmissing, 0.75) - np.quantile(neighbor_cap_nonmissing, 0.25)) if neighbor_cap_nonmissing.size >= 4 else np.nan
+                    normalized_neighbor_weights = neighbor_weights / max(neighbor_weights.sum(), 1e-12)
+                    effective_neighbors_per_term[term_length] = float(1.0 / max((normalized_neighbor_weights**2).sum(), 1e-12))
 
             # EH per-term ridge prediction
-            cap_eh[t] = predict_term_model_cap_pct(row_X, t, term_models.get(t), term_meta.get(t, {}))
+            cap_pct_model[term_length] = predict_term_model_cap_pct(row_X, term_length, term_models.get(term_length), term_meta.get(term_length, {}))
 
             # Blending EH and KNN
-            if n_t == 0:
-                w_model = eh_blend_strong
-            elif n_t < kmin_per_term:
-                w_model = eh_blend_base
+            if neighbor_count_term == 0:
+                model_weight = eh_blend_strong
+            elif neighbor_count_term < kmin_per_term:
+                model_weight = eh_blend_base
             else:
-                iq = iqr_knn[t]
-                w_model = eh_blend_base if pd.isna(iq) else min(eh_blend_cap, eh_blend_base + 0.10*(iq/0.05))
+                iqr_value = cap_pct_iqr[term_length]
+                model_weight = eh_blend_base if pd.isna(iqr_value) else min(eh_blend_cap, eh_blend_base + 0.10*(iqr_value/0.05))
 
-            w_model_term[t] = w_model
-            ck, ce = cap_knn[t], cap_eh[t]
-            if pd.isna(ck) and pd.isna(ce): 
-                cap_blend[t] = np.nan
-            elif pd.isna(ck):
-                cap_blend[t] = ce
-            elif pd.isna(ce):
-                cap_blend[t] = ck
+            model_weight_per_term[term_length] = model_weight
+            cap_knn_term, cap_eh_term = cap_pct_knn[term_length], cap_pct_model[term_length]
+            if pd.isna(cap_knn_term) and pd.isna(cap_eh_term): 
+                cap_pct_blend[term_length] = np.nan
+            elif pd.isna(cap_knn_term):
+                cap_pct_blend[term_length] = cap_eh_term
+            elif pd.isna(cap_eh_term):
+                cap_pct_blend[term_length] = cap_knn_term
             else:
-                cap_blend[t] = float(w_model*ce + (1.0 - w_model)*ck)
+                cap_pct_blend[term_length] = float(model_weight*cap_eh_term + (1.0 - model_weight)*cap_knn_term)
 
         row_out = {
-            "playerId": pid, "Start_Year": sY, "neighbor_count": int(len(neigh)),
+            "playerId": target_player_id, "Start_Year": start_year, "neighbor_count": int(len(neighbor_df)),
             "PosBucket": row.get("PosBucket",""), "status_group": row.get("status_group",""),
             "cap_era": row.get("cap_era",""), "role_tier": row.get("role_tier", np.nan)
             }
-        row_out.update(block_meta_for_target(idx_t))
+        row_out.update(block_meta_for_target(target_index))
 
-        for t in valid_terms:
-            row_out[f"capPct_len{t}"] = cap_blend[t]
-            row_out[f"capPct_len{t}_knn"] = cap_knn[t]
-            row_out[f"capPct_len{t}_eh"]  = cap_eh[t]
-            row_out[f"capPct_len{t}_iqr"] = iqr_knn[t]
-            row_out[f"n_len{t}"] = int(n_term[t])
-            row_out[f"eff_n_len{t}"] = float(eff_n_term[t]) if not pd.isna(eff_n_term[t]) else np.nan
-            row_out[f"w_model_len{t}"] = float(w_model_term[t])
+        for term_length in valid_terms:
+            row_out[f"capPct_len{term_length}"] = cap_pct_blend[term_length]
+            row_out[f"capPct_len{term_length}_knn"] = cap_pct_knn[term_length]
+            row_out[f"capPct_len{term_length}_eh"]  = cap_pct_model[term_length]
+            row_out[f"capPct_len{term_length}_iqr"] = cap_pct_iqr[term_length]
+            row_out[f"n_len{term_length}"] = int(neighbors_per_term[term_length])
+            row_out[f"eff_n_len{term_length}"] = float(effective_neighbors_per_term[term_length]) if not pd.isna(effective_neighbors_per_term[term_length]) else np.nan
+            row_out[f"w_model_len{term_length}"] = float(model_weight_per_term[term_length])
         out_rows.append(row_out)
 
         # top-5 comps (for dashboard)
-        order_by_w = np.argsort(neigh["knn_weight"].to_numpy())[::-1]
+        order_by_weight_desc = np.argsort(neighbor_df["knn_weight"].to_numpy())[::-1]
         seen_pids = set()
         rank = 1
-        for ni in order_by_w:
+        for neighbor_idx in order_by_weight_desc:
             if rank > 5:
                 break
 
-            nr = neigh.iloc[ni]
-            comp_pid = nr.get("playerId", np.nan)
+            neighbor_row = neighbor_df.iloc[neighbor_idx]
+            comp_pid = neighbor_row.get("playerId", np.nan)
 
             if pd.isna(comp_pid):
                 continue
 
             try:
-                if not pd.isna(pid) and int(comp_pid) == int(pid):
+                if not pd.isna(target_player_id) and int(comp_pid) == int(target_player_id):
                     continue
             except Exception:
                 continue
@@ -833,63 +902,68 @@ def compute_knn_and_terms(train_df, target_df, block_weights, k_neighbors, dista
 
             seen_pids.add(key_pid)
             comps_rows.append({
-                "target_playerId": pid,
+                "target_playerId": target_player_id,
                 "comp_rank": rank,
                 "comp_playerId": comp_pid,
-                "comp_PlayerName": nr.get("PlayerName", ""),
-                "comp_Pos": nr.get("Pos", ""),
-                "comp_PosBucket": nr.get("PosBucket", ""),
-                "comp_RoleBucket": nr.get("RoleBucket", ""),
-                "comp_Start_Year": nr.get("Start_Year", np.nan),
-                "comp_Length": nr.get("Length", np.nan),
-                "comp_CapPct": nr.get("Start_Yr_Cap_Pct", np.nan),
-                "comp_weight_norm": nr.get("knn_weight", np.nan),
-                "comp_dist": nr.get("knn_dist", np.nan),
-                "comp_sim_pct": nr.get("knn_sim_pct", np.nan),
+                "comp_PlayerName": neighbor_row.get("PlayerName", ""),
+                "comp_Pos": neighbor_row.get("Pos", ""),
+                "comp_PosBucket": neighbor_row.get("PosBucket", ""),
+                "comp_RoleBucket": neighbor_row.get("RoleBucket", ""),
+                "comp_Start_Year": neighbor_row.get("Start_Year", np.nan),
+                "comp_Length": neighbor_row.get("Length", np.nan),
+                "comp_CapPct": neighbor_row.get("Start_Yr_Cap_Pct", np.nan),
+                "comp_weight_norm": neighbor_row.get("knn_weight", np.nan),
+                "comp_dist": neighbor_row.get("knn_dist", np.nan),
+                "comp_sim_pct": neighbor_row.get("knn_sim_pct", np.nan),
                 })
             rank += 1
     return pd.DataFrame(out_rows), pd.DataFrame(comps_rows)
 
-# Evaluation
+# Evaluation against real-signed terms
 def evaluate_per_true_term(pred_df, target_df):
     join_keys = ["playerId", "Start_Year"]
     meta_cols = ["PosBucket", "status_group", "cap_era", "role_tier"]
-    td = ensure_meta_cols(target_df, meta_cols)
+    target_with_meta = ensure_meta_cols(target_df, meta_cols)
 
-    base = td[["playerId","Start_Year","Length","Start_Yr_Cap_Pct"] + meta_cols].copy()
+    base = target_with_meta[["playerId","Start_Year","Length","Start_Yr_Cap_Pct"] + meta_cols].copy()
     base["Length"] = pd.to_numeric(base["Length"], errors="coerce").astype("Int64")
 
     pred_df = pred_df.drop(columns=meta_cols, errors="ignore")
     df = base.merge(pred_df, on=join_keys, how="left")
-
-    cap_err, pred_cap, n_true, effn_true, wmodel_true = [], [], [], [], []
-    for i, L in enumerate(df["Length"].astype("Int64").tolist()):
-        if pd.isna(L):
+    cap_err = []
+    pred_cap = []
+    neighbor_count_list = []
+    effective_neighbors_list = []
+    true_model_weight_list = []
+    
+    # Loop by row, reading off the true term and then pulling the matching prediction
+    for i, true_term_length in enumerate(df["Length"].astype("Int64").tolist()):
+        if pd.isna(true_term_length):
             cap_err.append(np.nan)
             pred_cap.append(np.nan)
-            n_true.append(np.nan) 
-            effn_true.append(np.nan)
-            wmodel_true.append(np.nan) 
+            neighbor_count_list.append(np.nan) 
+            effective_neighbors_list.append(np.nan)
+            true_model_weight_list.append(np.nan) 
             continue
-        cap_col = f"capPct_len{int(L)}"
-        ncol, encol, wmcol = f"n_len{int(L)}", f"eff_n_len{int(L)}", f"w_model_len{int(L)}"
+        cap_column_name = f"capPct_len{int(true_term_length)}"
+        neighbor_count_column, effective_neighbors_column, model_weight_column = f"n_len{int(true_term_length)}", f"eff_n_len{int(true_term_length)}", f"w_model_len{int(true_term_length)}"
 
-        if cap_col not in df.columns or pd.isna(df.at[i, cap_col]) or pd.isna(df.at[i, "Start_Yr_Cap_Pct"]):
+        if cap_column_name not in df.columns or pd.isna(df.at[i, cap_column_name]) or pd.isna(df.at[i, "Start_Yr_Cap_Pct"]):
             cap_err.append(np.nan)
             pred_cap.append(np.nan)
         else:
-            cap_err.append(abs(float(df.at[i, cap_col]) - float(df.at[i, "Start_Yr_Cap_Pct"])))
-            pred_cap.append(float(df.at[i, cap_col]))
+            cap_err.append(abs(float(df.at[i, cap_column_name]) - float(df.at[i, "Start_Yr_Cap_Pct"])))
+            pred_cap.append(float(df.at[i, cap_column_name]))
 
-        n_true.append(float(df.at[i, ncol]) if ncol in df.columns else np.nan)
-        effn_true.append(float(df.at[i, encol]) if encol in df.columns else np.nan)
-        wmodel_true.append(float(df.at[i, wmcol]) if wmcol in df.columns else np.nan)
+        neighbor_count_list.append(float(df.at[i, neighbor_count_column]) if neighbor_count_column in df.columns else np.nan)
+        effective_neighbors_list.append(float(df.at[i, effective_neighbors_column]) if effective_neighbors_column in df.columns else np.nan)
+        true_model_weight_list.append(float(df.at[i, model_weight_column]) if model_weight_column in df.columns else np.nan)
 
     df["abs_err_capPct"] = cap_err
     df["pred_capPct_at_true_term"] = pred_cap
-    df["n_neighbors_true_term"] = n_true
-    df["eff_n_true_term"] = effn_true
-    df["w_model_true_term"] = wmodel_true
+    df["n_neighbors_true_term"] = neighbor_count_list
+    df["eff_n_true_term"] = effective_neighbors_list
+    df["w_model_true_term"] = true_model_weight_list
 
     def get_mean(x):
         vals = pd.to_numeric(x, errors="coerce")
@@ -899,6 +973,7 @@ def evaluate_per_true_term(pred_df, target_df):
         vals = pd.to_numeric(x, errors="coerce")
         return float(vals.median(skipna=True)) if vals.notna().any() else np.nan
 
+    # Aggregate error metrics by contract term
     rows = []
     for t in range(1, 9):
         mask = df["Length"].astype("Int64").eq(t)
@@ -915,22 +990,22 @@ def evaluate_per_true_term(pred_df, target_df):
     return df, by_term
 
 def error_breakdowns(expiring_eval_df):
-    dims = ["PosBucket", "status_group", "cap_era", "role_tier"]
-    df = ensure_meta_cols(expiring_eval_df, dims).copy()
+    group_dimensions = ["PosBucket", "status_group", "cap_era", "role_tier"]
+    df = ensure_meta_cols(expiring_eval_df, group_dimensions).copy()
     if "abs_err_capPct" not in df.columns:
         df["abs_err_capPct"] = np.nan
 
     parts = []
-    for d in dims:
-        cols = [c for c in [d, "abs_err_capPct"] if c in df.columns]
-        if d not in cols:
+    for dimension in group_dimensions:
+        group_columns = [c for c in [dimension, "abs_err_capPct"] if c in df.columns]
+        if dimension not in group_columns:
             continue
-        g = (df[cols].groupby(d, dropna=False, observed=True)["abs_err_capPct"].agg(n="count",
+        group_stats = (df[group_columns].groupby(dimension, dropna=False, observed=True)["abs_err_capPct"].agg(n="count",
                  MAE_cap_pct=lambda x: pd.to_numeric(x, errors="coerce").mean(skipna=True),
                  median_abs_error=lambda x: pd.to_numeric(x, errors="coerce").median(skipna=True))
             .reset_index())
-        g.insert(0, "group_by", d)
-        parts.append(g)
+        group_stats.insert(0, "group_by", dimension)
+        parts.append(group_stats)
 
     if parts:
         return pd.concat(parts, ignore_index=True, sort=False)
@@ -940,26 +1015,26 @@ def widen_top5_comps(comps_df):
     if comps_df is None or len(comps_df) == 0:
         return pd.DataFrame(columns=["playerId"])
 
-    gdf = comps_df.copy()
-    gdf = gdf.sort_values(["target_playerId", "comp_rank", "comp_weight_norm"], ascending=[True, True, False])
+    sorted_comps = comps_df.copy()
+    sorted_comps = sorted_comps.sort_values(["target_playerId", "comp_rank", "comp_weight_norm"], ascending=[True, True, False])
     out_rows = []
-    for pid, grp in gdf.groupby("target_playerId", dropna=False):
-        row_dict = {"playerId": pid}
-        grp = grp.drop_duplicates(subset=["comp_playerId"], keep="first")
-        grp = grp.head(5).reset_index(drop=True)
+    for target_id, target_group in sorted_comps.groupby("target_playerId", dropna=False):
+        row_dict = {"playerId": target_id}
+        target_group = target_group.drop_duplicates(subset=["comp_playerId"], keep="first")
+        target_group = target_group.head(5).reset_index(drop=True)
 
-        for idx, row in enumerate(grp.itertuples(index=False), start=1):
-            row_dict[f"comp{idx}_playerId"] = getattr(row, "comp_playerId", np.nan)
-            row_dict[f"comp{idx}_PlayerName"] = getattr(row, "comp_PlayerName", "")
-            row_dict[f"comp{idx}_Pos"] = getattr(row, "comp_Pos", "")
-            row_dict[f"comp{idx}_PosBucket"] = getattr(row, "comp_PosBucket", "")
-            row_dict[f"comp{idx}_RoleBucket"] = getattr(row, "comp_RoleBucket", "")
-            row_dict[f"comp{idx}_Start_Year"] = getattr(row, "comp_Start_Year", np.nan)
-            row_dict[f"comp{idx}_Length"] = getattr(row, "comp_Length", np.nan)
-            row_dict[f"comp{idx}_CapPct"] = getattr(row, "comp_CapPct", np.nan)
-            row_dict[f"comp{idx}_weight_norm"] = getattr(row, "comp_weight_norm", np.nan)
-            row_dict[f"comp{idx}_dist"] = getattr(row, "comp_dist", np.nan)
-            row_dict[f"comp{idx}_sim_pct"] = getattr(row, "comp_sim_pct", np.nan)
+        for comp_index, row in enumerate(target_group.itertuples(index=False), start=1):
+            row_dict[f"comp{comp_index}_playerId"] = getattr(row, "comp_playerId", np.nan)
+            row_dict[f"comp{comp_index}_PlayerName"] = getattr(row, "comp_PlayerName", "")
+            row_dict[f"comp{comp_index}_Pos"] = getattr(row, "comp_Pos", "")
+            row_dict[f"comp{comp_index}_PosBucket"] = getattr(row, "comp_PosBucket", "")
+            row_dict[f"comp{comp_index}_RoleBucket"] = getattr(row, "comp_RoleBucket", "")
+            row_dict[f"comp{comp_index}_Start_Year"] = getattr(row, "comp_Start_Year", np.nan)
+            row_dict[f"comp{comp_index}_Length"] = getattr(row, "comp_Length", np.nan)
+            row_dict[f"comp{comp_index}_CapPct"] = getattr(row, "comp_CapPct", np.nan)
+            row_dict[f"comp{comp_index}_weight_norm"] = getattr(row, "comp_weight_norm", np.nan)
+            row_dict[f"comp{comp_index}_dist"] = getattr(row, "comp_dist", np.nan)
+            row_dict[f"comp{comp_index}_sim_pct"] = getattr(row, "comp_sim_pct", np.nan)
 
         out_rows.append(row_dict)
 
@@ -990,32 +1065,33 @@ def write_results(out_dir, season_str, expiring_df, whatif_df, pred_df, comps_df
         per_term_cols += [f"capPct_len{t}", f"capPct_len{t}_knn", f"capPct_len{t}_eh", f"capPct_len{t}_iqr", f"n_len{t}", f"eff_n_len{t}", f"w_model_len{t}"]
 
     keep = [c for c in keep_base + per_term_cols + proj_cols if c in union_pred.columns]
-    res = union_pred[keep].copy()
+    results_df = union_pred[keep].copy()
     comps_wide = widen_top5_comps(comps_df)
-    res = res.merge(comps_wide, on="playerId", how="left")
-    res = (res.sort_values(["playerId","Start_Year"], ascending=[True, True])
-              .drop_duplicates(subset=["playerId","Start_Year"], keep="first").copy())
+    results_df = results_df.merge(comps_wide, on="playerId", how="left")
+    results_df = (results_df.sort_values(["playerId","Start_Year"], ascending=[True, True]).drop_duplicates(subset=["playerId","Start_Year"], keep="first").copy())
 
     out_results = out_dir / f"contract_results_{season_str}.csv"
-    res.to_csv(out_results, index=False)
-    return res
+    results_df.to_csv(out_results, index=False)
+    return results_df
 
 def write_model_diagnostics(out_dir, season_str, by_term_df):
     cols = ["term","n_eval","MAE_cap_pct","median_abs_error"]
-    bt = by_term_df.copy()
+    diag_df = by_term_df.copy()
     for c in cols:
-        if c not in bt.columns: 
-            bt[c] = np.nan
-    bt = bt.sort_values("term")
-    out_file = out_dir / f"model_diagnostics_{season_str}.csv"
-    bt[cols].to_csv(out_file, index=False)
+        if c not in diag_df.columns: 
+            diag_df[c] = np.nan
+    diag_df = diag_df.sort_values("term")
+    diagnostics_path = out_dir / f"model_diagnostics_{season_str}.csv"
+    diag_df[cols].to_csv(diagnostics_path, index=False)
 
 # Main
 def main():
+    # Load contracts and build GAR bank
     contracts_all = load_contracts(contracts_master_path)
     contracts_all["cap_era"] = contracts_all["Start_Year"].apply(cap_era_label_from_year)
     gar_bank = build_prev_season_bank(clean_dir, 2015, target_year-1)
     contracts_cut = contracts_all.loc[contracts_all["Start_Year"] <= target_year].copy()
+    # Build per-contract training rows linking to prior-year GAR/WAR and age curve projections
     training_master = build_training_master(contracts_cut, gar_bank)
     age_curve = load_age_curve(age_curve_path)
     age_ratio_tables = build_ratio_tables(age_curve)
@@ -1023,16 +1099,17 @@ def main():
 
     train_df = training_master.loc[training_master["Start_Year"] < target_year].copy()
     expiring_df = training_master.loc[training_master["Start_Year"] == target_year].copy()
+    
+    # Base population of skaters who played last year and signed contracts this year
     gar_prev = gar_bank.loc[gar_bank["Stats_Year"] == target_year-1].copy()
     base = (gar_prev.sort_values(["playerId","TOI_all"], ascending=[True, False]).drop_duplicates(subset=["playerId"]).copy())
     base["PlayerName"] = base["Player"]
     base["Pos"] = base["PosBucket"].map(lambda x: "D" if str(x).upper()=="D" else "F")
 
     cc = contracts_all.copy().sort_values(["playerId","Start_Year"])
-    last = cc.groupby("playerId").tail(1)[["playerId","Signing_Age","Signing_Season",
-                                           "Signing_Status","Level_raw","Clauses_raw",
-                                           "clause_bucket","level_clean","Shot","Weight_lb","Height_in",
-                                           "cap_era","age_band","Signing_GM"]].copy()
+    last = cc.groupby("playerId").tail(1)[["playerId","Signing_Age","Signing_Season", "Signing_Status","Level_raw","Clauses_raw",
+                                           "clause_bucket","level_clean","Shot","Weight_lb","Height_in", "cap_era","age_band","Signing_GM"]].copy()
+    
     def parse_season_start(ss):
         if pd.isna(ss): 
             return np.nan
@@ -1040,6 +1117,8 @@ def main():
         return int(m.group(1)) if m else np.nan
         
     last["Signing_Season_StartYr"] = last["Signing_Season"].apply(parse_season_start).astype("Int64")
+    
+    # Extrapolate the player's "current" age at the target year based on last known signing
     def extrap_age(row):
         a, y0 = row["Signing_Age"], row["Signing_Season_StartYr"]
         if pd.isna(a) or pd.isna(y0): 
@@ -1077,7 +1156,8 @@ def main():
     for c in keep:
         if c not in wf.columns: 
             wf[c] = np.nan
-        
+    
+    # Attach projections for what-if players
     whatif_df = wf[keep].copy()
     whatif_df = attach_gar_projections(whatif_df, gar_bank, age_ratio_tables, horizon=9)
     expiring_ids = set(expiring_df["playerId"].dropna().astype("Int64"))
@@ -1087,15 +1167,20 @@ def main():
     target_df = (pd.concat([expiring_df, whatif_df], ignore_index=True, sort=False).sort_values(["playerId","Start_Year","src"], ascending=[True, True, True])
                    .drop_duplicates(subset=["playerId","Start_Year"], keep="first").drop(columns="src").copy())
 
+    # Fit KNN and Ridge models for each term using historical contracts
     K_opt = k_neighbors
     W_opt = block_weights
     dm_opt = distance_scale
     uq_opt = kernel_power
-    eh_alpha_opt, eh_b_opt, eh_s_opt, eh_cap_opt = evolv_hockey_blend_alpha, evolv_hockey_blend_base, evolv_hockey_blend_strong, evolv_hockey_blend_cap
+    eh_alpha_opt = evolv_hockey_blend_alpha
+    eh_b_opt = evolv_hockey_blend_base
+    eh_s_opt = evolv_hockey_blend_strong
+    eh_cap_opt = evolv_hockey_blend_cap
     term_models, term_meta = fit_term_models(train_df, list(range(1,9)), alpha=eh_alpha_opt)
     pred_df, comps_df = compute_knn_and_terms(train_df, target_df, W_opt, K_opt, dm_opt, uq_opt, k_min_per_term,
                                               term_models, term_meta, eh_blend_base=eh_b_opt, eh_blend_strong=eh_s_opt, eh_blend_cap=eh_cap_opt)
 
+    # Evaluate only on contracts starting in target year
     base_targ = target_df.loc[target_df["Start_Year"].astype("Int64")==target_year].copy()
     eval_joined, by_term = evaluate_per_true_term(pred_df, base_targ)
     write_results(out_dir, season_str, expiring_df, whatif_df, pred_df, comps_df)

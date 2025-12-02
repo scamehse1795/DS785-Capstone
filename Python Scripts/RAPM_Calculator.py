@@ -187,11 +187,13 @@ def filter_games_with_no_shifts(season, pbp_events, pbp_fenwick, shifts):
     return events, fenwick
 
 def build_indices_for_period(gid, per, pbp_events, pbp_fenwick, shifts, home_tid, away_tid):
+    # Subset down to just events/shifts for target game/period
     events = pbp_events[(pbp_events["gameId"] == gid) & (pbp_events["period"] == per)].copy()
     fenwick = pbp_fenwick[(pbp_fenwick["gameId"] == gid) & (pbp_fenwick["period"] == per)].copy()
     home_shifts = shifts[(shifts["gameId"] == gid) & (shifts["period"] == per) & (shifts["teamId"] == home_tid)].copy()
     away_shifts = shifts[(shifts["gameId"] == gid) & (shifts["period"] == per) & (shifts["teamId"] == away_tid)].copy()
 
+    # Build a sorted time grid from 0, period end, all event times, and all shift start/end times
     grid = sorted(set(
         [0.0, period_end_seconds(per)]
         + events["eventSec"].tolist()
@@ -201,19 +203,23 @@ def build_indices_for_period(gid, per, pbp_events, pbp_fenwick, shifts, home_tid
     if len(grid) < 2:
         return grid, None
 
+    # Map each event time to event types occurring at that second
     types_by_t = defaultdict(set)
     for t, gsub in events.groupby("eventSec"):
         types_by_t[float(t)] = set(gsub["type"].tolist())
 
+    # Identify stoppages, faceoffs, and goals
     stopp = set(float(t) for t, ts in types_by_t.items() if "STOPPAGE" in ts)
     fac = set(float(t) for t, ts in types_by_t.items() if "FACEOFF" in ts)
     goal_at_t = set(float(t) for t, ts in types_by_t.items() if "GOAL" in ts)
 
+    # Mark faceoff start times that follow (or match) a stoppage
     fo_start_at_t = set()
     for t in fac:
         if (t in stopp) or ((t - 1.0) in stopp):
             fo_start_at_t.add(t)
 
+    # Track faceoff zone starts from home team persepctive
     zone_by_t = {}
     if "faceoff_zone_home" in events.columns:
         fo_rows = events[events["type"] == "FACEOFF"][["eventSec", "faceoff_zone_home"]]
@@ -223,6 +229,7 @@ def build_indices_for_period(gid, per, pbp_events, pbp_fenwick, shifts, home_tid
                 z = r["faceoff_zone_home"]
                 zone_by_t[tt] = "N" if pd.isna(z) else str(z)
 
+    # Precompute score at each event time and map for each event in grid
     events_sort = events.sort_values("eventSec")
     times = events_sort["eventSec"].to_numpy()
     HS = events_sort["home_score"].fillna(0).astype(int).to_numpy()
@@ -237,6 +244,7 @@ def build_indices_for_period(gid, per, pbp_events, pbp_fenwick, shifts, home_tid
         idx = last_idx_leq(t0)
         score_at_left[t0] = (int(HS[idx]), int(AS[idx])) if idx >= 0 else (0, 0)
 
+    # Prepare xG series from Fenwick events to quickly sum xG over any [a,b) window
     fenwick_sorted = fenwick.sort_values("eventSec")
     fenwick_times = fenwick_sorted["eventSec"].to_numpy()
     fenwick_xg = fenwick_sorted["xG"].fillna(0.0).to_numpy()
@@ -245,6 +253,7 @@ def build_indices_for_period(gid, per, pbp_events, pbp_fenwick, shifts, home_tid
     home_xg_cum = np.cumsum(np.where(home_mask, fenwick_xg, 0.0))
     away_xg_cum = np.cumsum(np.where(~home_mask, fenwick_xg, 0.0))
 
+    # Return (home_xG, away_xG) accumulated between times a and b
     def xg_sum(a, b):
         if len(fenwick_times) == 0:
             return 0.0, 0.0
@@ -264,6 +273,7 @@ def build_indices_for_period(gid, per, pbp_events, pbp_fenwick, shifts, home_tid
     home_starts, home_ends, home_start_idx, home_end_idx, home_active = make_sweeper(home_shifts)
     away_starts, away_ends, away_start_idx, away_end_idx, away_active = make_sweeper(away_shifts)
 
+    # Update active players at time t by advancing through start/end arrays
     def update_active(t, s_arr, e_arr, si, ei, active):
         while si < len(s_arr) and float(s_arr[si][1]) <= t:
             pid = int(s_arr[si][0])
@@ -313,6 +323,7 @@ def ppx_pkx_for_next_stint(prev_row_strength, now_row_strength, is_fo_start):
 # Stint Builder
 def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, home_team_by_game, away_team_by_game):
     rows = []
+    # Games need to have both shift and pbp events (should already be filtered but just an extra safeguard)
     games = sorted(set(pbp_events["gameId"].astype(int)).intersection(set(shifts["gameId"].astype(int))))
     for gid in games:
         home_tid = int(home_team_by_game.get(gid, -1))
@@ -324,20 +335,20 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
         s_per = set(pd.to_numeric(shifts.loc[shifts["gameId"] == gid, "period"], errors="coerce").dropna().astype(int))
         periods = sorted(list((p_per | s_per) & {1, 2, 3}))
         for per in periods:
+            # Build a pbp grid for period/game
             grid, idx = build_indices_for_period(gid, per, pbp_events, pbp_fenwick, shifts, home_tid, away_tid)
             if idx is None or len(grid) < 2:
                 continue
 
-            home_starts, home_ends, home_start_idx, home_end_idx, home_active = idx["home_starts"], idx["home_ends"], idx["home_start_idx"], idx["home_end_idx"], idx["home_active"]
-            away_starts, away_ends, away_start_idx, away_end_idx, away_active = idx["away_starts"], idx["away_ends"], idx["away_start_idx"], idx["away_end_idx"], idx["away_active"]
             update_active = idx["update_active"]
 
             def active_skaters(act):
                 return tuple(sorted([p for p in act.keys() if p in skater_ids]))
-
+            
+            # Start first stint on left edge of period (time of 0, faceoff inclusive)
             open_start = grid[0]
-            home_start_idx, home_end_idx, home_active = update_active(grid[1], home_starts, home_ends, home_start_idx, home_end_idx, home_active)
-            away_start_idx, away_end_idx, away_active = update_active(grid[1], away_starts, away_ends, away_start_idx, away_end_idx, away_active)
+            home_start_idx, home_end_idx, home_active = update_active(grid[1], idx["home_starts"], idx["home_ends"], idx["home_start_idx"], idx["home_end_idx"], idx["home_active"])
+            away_start_idx, away_end_idx, away_active = update_active(grid[1], idx["away_starts"], idx["away_ends"], idx["away_start_idx"], idx["away_end_idx"], idx["away_active"])
             hs, as_ = idx["score_at_left"].get(open_start, (0, 0))
             open_state = (active_skaters(home_active), active_skaters(away_active), 1, 1, hs - as_)
             zone_off, zone_def, zone_neu = 0, 0, 0
@@ -352,17 +363,22 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
             for j in range(1, len(grid)):
                 t0e = grid[j - 1]
                 t1e = grid[j]
-                home_start_idx, home_end_idx, home_active = update_active(t1e, home_starts, home_ends, home_start_idx, home_end_idx, home_active)
-                away_start_idx, away_end_idx, away_active = update_active(t1e, away_starts, away_ends, away_start_idx, away_end_idx, away_active)
+                # Update which players are active at t1e for home and away
+                home_start_idx, home_end_idx, home_active = update_active(t1e, idx["home_starts"], idx["home_ends"], idx["home_start_idx"], idx["home_end_idx"], idx["home_active"])
+                away_start_idx, away_end_idx, away_active = update_active(t1e, idx["away_starts"], idx["away_ends"], idx["away_start_idx"], idx["away_end_idx"], idx["away_active"])
+                hs, as_ = idx["score_at_left"].get(open_start, (0, 0))
                 home_set = active_skaters(home_active)
                 away_set = active_skaters(away_active)
                 hs, as_ = idx["score_at_left"].get(t0e, (0, 0))
                 score_diff = hs - as_
                 state = (home_set, away_set, 1, 1, score_diff)
+                
+                # Decide whether to cut the current stint here (new state, goal, or faceoff)
                 cut_now = (state != open_state) or (t1e in idx["goal_at_t"]) or (t1e in idx["fo_start_at_t"])
                 if cut_now:
                     minutes = (t1e - open_start) / 60.0
                     if minutes > 0:
+                        # Get xG for and against for this stint window
                         hx, ax = idx["xg_sum"](open_start, t1e)
                         home_skaters = len(open_state[0])
                         away_skaters = len(open_state[1])
@@ -372,6 +388,7 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
                         away_score_flags = encode_score_buckets(-open_state[4])
                         per2 = 1 if per == 2 else 0
                         per3 = 1 if per == 3 else 0
+                        # Add a stint row from the home team’s perspective
                         rows.append(dict(
                             gameId=gid, period=per, teamId=home_tid,
                             startSec=open_start, endSec=t1e, minutes=minutes,
@@ -390,6 +407,7 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
                             per2=per2, per3=per3,
                             strength_key=f"{home_skaters}v{away_skaters}"
                             ))
+                        # Add a matching stint row from the away team’s perspective
                         rows.append(dict(
                             gameId=gid, period=per, teamId=away_tid,
                             startSec=open_start, endSec=t1e, minutes=minutes,
@@ -408,7 +426,8 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
                             per2=per2, per3=per3,
                             strength_key=f"{away_skaters}v{home_skaters}"
                             ))
-
+                        
+                    # Update zone and special-teams transition flags for the next stint segment
                     prevH = row_strength_from_counts(len(open_state[0]), len(open_state[1]))
                     prevA = row_strength_from_counts(len(open_state[1]), len(open_state[0]))
                     nowH = row_strength_from_counts(len(state[0]), len(state[1]))
@@ -420,6 +439,7 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
                     else:
                         zone_off, zone_def, zone_neu = 0, 0, 0
 
+                    # Compute indicators for PP/PK stints starting or ending on the fly
                     PPxH, PKxH = ppx_pkx_for_next_stint(prevH, nowH, is_fo)
                     PPxA, PKxA = ppx_pkx_for_next_stint(prevA, nowA, is_fo)
                     ev_after_H = int(prevH in ["Power Play", "Penalty Kill"] and nowH == "Even Strength" and not is_fo)
@@ -429,6 +449,7 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
                     open_start = t1e
                     open_state = state
 
+            # Close out any final open stint to the end of the period
             if open_start < grid[-1]:
                 minutes = (grid[-1] - open_start) / 60.0
                 if minutes > 0:
@@ -441,6 +462,7 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
                     away_score_flags = encode_score_buckets(-open_state[4])
                     per2 = 1 if per == 2 else 0
                     per3 = 1 if per == 3 else 0
+                    # Final home stint row for this game/period
                     rows.append(dict(
                         gameId=gid, period=per, teamId=home_tid,
                         startSec=open_start, endSec=grid[-1], minutes=minutes,
@@ -459,6 +481,7 @@ def build_stints(season, skater_ids, pbp_events, pbp_fenwick, shifts, b2b_map, h
                         per2=per2, per3=per3,
                         strength_key=f"{home_skaters}v{away_skaters}"
                         ))
+                    # Final away stint row for this game/period
                     rows.append(dict(
                         gameId=gid, period=per, teamId=away_tid,
                         startSec=open_start, endSec=grid[-1], minutes=minutes,
@@ -717,7 +740,9 @@ def choose_lambda(X, y_rate, y_raw, w, groups, seed):
 
     return best_lambda, best_mse_rate, rows
 
+# Fit ridge regression models across a grid of lambdas, choose the best lambda by cross-validation, and write per-player RAPM xGF/xGA results and fit meta data
 def fit(season, situation, X_off, X_def, X_ctx, y_rate, y_raw, w, player_ids, ev, base_ctx, avg_stint_minutes, pid_to_name, goalie_ids):
+    # Group stints by gameId
     groups = ev["gameId"].astype(int).to_numpy()
     scalers = build_minutes_scalers(ev, player_ids, goalie_ids)
     Xo_s, Xd_s = apply_scalers_to_blocks(X_off, X_def, player_ids, scalers)
@@ -847,6 +872,7 @@ def run_one_season(year):
     print(f"Running RAPM for {season}")
     ensure_dirs(season)
 
+    # Clear fit meta file if toggle is on and rebuild columns
     if clear_fit_meta_toggle:
         meta_path = fitmeta_path(season)
         header = pd.DataFrame(columns=[
@@ -858,26 +884,30 @@ def run_one_season(year):
             ])
         header.to_csv(meta_path, index=False)
 
+    # Load skater, shift, and pbp data
     skater_ids, goalie_ids, pid_to_name = load_player_game_stats(season)
     shifts = load_shifts(season)
     pbp_ctx, pbp_fen = load_pbp(season)
     
+    # Load TeamGames data and filter pbp to only games with shift data
     b2b_map, home_team_by_game, away_team_by_game = load_teamgames(season)
     pbp_ctx, pbp_fen = filter_games_with_no_shifts(season, pbp_ctx, pbp_fen, shifts)
 
+    # Filter out micro-stints
     stints = ensure_stints(season, skater_ids, pbp_ctx, pbp_fen, shifts, b2b_map, home_team_by_game, away_team_by_game)
-    
     duration_sec = pd.to_numeric(stints["endSec"], errors="coerce") - pd.to_numeric(stints["startSec"], errors="coerce")
     stints = stints[duration_sec.fillna(0.0) >= 10.0].copy()
 
     stints["players"] = stints["players"].apply(parse_players_field)
     stints["opp_players"] = stints["opp_players"].apply(parse_players_field)
-
+    
     for situation in situation_list:
+        # Construct design matrix for each situation, skipping if there are no rows
         X_off, X_def, X_ctx, y_rate, y_raw, w, P, ev, base_ctx, avg_stint_minutes = prepare_design(stints, situation)
         if X_off.shape[0] == 0:
             print("No rows; skipping")
             continue
+        # Fit ridge regression
         fit(season, situation, X_off, X_def, X_ctx, y_rate, y_raw, w, P, ev, base_ctx, avg_stint_minutes, pid_to_name, goalie_ids)
 
 def main():

@@ -77,7 +77,7 @@ def ensure_folder(folder_path):
 def stats_path_for_season(stats_season):
     return data_root / stats_season / (GAR_file_pattern.format(season=stats_season))
 
-def safe_get_cap(contract_season):
+def get_cap(contract_season):
     known = sorted(cap_table.keys(), key=start_year_from_season_str)
     target_y = start_year_from_season_str(contract_season)
     last_known = None
@@ -93,7 +93,7 @@ def safe_get_cap(contract_season):
         y += 1
     return int(round(val))
 
-def safe_get_min_salary(contract_season):
+def get_min_salary(contract_season):
     if contract_season in min_salary_table:
         return min_salary_table[contract_season]
     known = sorted(min_salary_table.keys(), key=start_year_from_season_str)
@@ -125,6 +125,7 @@ def median_ape_and_iqr(actual, pred):
     q3 = float(np.percentile(ape, 75))
     return median_ape, (q3 - q1)
 
+# Shrink outlier values to stabilize market rate (also mirrors more how players are priced IRL)
 def compress_value_signal(x, center, pos_gamma, neg_gamma):
     arr = np.asarray(x, dtype=float)
     out = arr.copy()
@@ -140,10 +141,11 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     out_folder = data_root / contract_season
     ensure_folder(out_folder)
 
-    league_cap = float(safe_get_cap(contract_season))
-    league_min = float(safe_get_min_salary(contract_season))
+    league_cap = float(get_cap(contract_season))
+    league_min = float(get_min_salary(contract_season))
     stats_path = stats_path_for_season(stats_season)
 
+    # Load WAR/SPAR for the main stats season and keep only key columns and valid playerIDs
     stats_df = pd.read_csv(stats_path)
     req_stats = ["Player", "PlayerID", "PosBucket", "WAR", "SPAR"]
     stats_df = stats_df[req_stats].copy()
@@ -155,6 +157,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     stats_df["statsSeason"] = stats_season
     stats_df["contractSeason"] = contract_season
 
+    # Load prior season(s) WAR/SPAR if it exists
     def load_prior(prior_season):
         pth = stats_path_for_season(prior_season)
         if not pth.exists():
@@ -182,6 +185,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     if prior_frames[2] is not None:
         stats_small = stats_small.merge(prior_frames[2].rename(columns={"WAR":"WAR_p2","SPAR":"SPAR_p2"}), on="playerId", how="left")
 
+    # Set up priors array and load in data for previous 2 seasons, if they exist
     prior_weights_arr = np.array(priors_weight_list + [0]*(3-len(priors_weight_list)), dtype=float)
     
     def col_or_nan(df, col):
@@ -189,7 +193,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
             return pd.to_numeric(df[col], errors="coerce")
         return pd.Series(np.nan, index=df.index, dtype=float)
     
-    parts_war  = [
+    parts_war = [
         pd.to_numeric(stats_small["WAR"], errors="coerce"),
         col_or_nan(stats_small, "WAR_p1"),
         col_or_nan(stats_small, "WAR_p2"),
@@ -200,6 +204,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
         col_or_nan(stats_small, "SPAR_p2"),
         ]
     
+    # Blend priors together, ignoring missing entries
     def blend_triplet(values_tuple):
         vals = np.array(values_tuple, dtype=float)
         mask = np.isfinite(vals)
@@ -209,9 +214,11 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
         ww = ww / ww.sum()
         return float(np.dot(ww, vals[mask]))
     
+    # Build blended WAR/SPAR estimates using current + prior seasons
     stats_small["WAR_blend"] = [blend_triplet(v) for v in zip(parts_war[0],  parts_war[1],  parts_war[2])]
     stats_small["SPAR_blend"] = [blend_triplet(v) for v in zip(parts_spar[0], parts_spar[1], parts_spar[2])]
 
+    # Filter contracts to current season and drop ELCs
     contracts_season_df = contracts_df.copy()
     contracts_season_df = contracts_season_df[contracts_season_df[season_col] == contract_season].copy()
     contracts_season_df = contracts_season_df.dropna(subset=["playerId"]).copy()
@@ -224,6 +231,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     contracts_season_df["Bucket"] = contracts_season_df["playerId"].map(id_to_bucket)
     contracts_season_df.loc[contracts_season_df["Bucket"].isna(), "Bucket"] = "ALL"
 
+    # Merge WAR/SPAR esimates with contract data
     joined = pd.merge(
         contracts_season_df[["playerId", "Bucket", "Cap Hit"]],
         stats_small[["playerId","WAR_blend","SPAR_blend"]],
@@ -235,6 +243,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     fit_base["WAR_fit"]  = pd.to_numeric(fit_base["WAR_blend"], errors="coerce").fillna(0.0).clip(lower=0.0)
     fit_base["SPAR_fit"] = pd.to_numeric(fit_base["SPAR_blend"], errors="coerce").fillna(0.0).clip(lower=0.0)
 
+    # Estimate cap % per WAR/SPAR ratio by position bucket
     def compute_rates(contracts_stats_df, metric_col):
         rows = []
         for bucket in ["ALL", "F", "D"]:
@@ -273,6 +282,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     rate_spar_war = compute_rates(fit_base, "WAR_fit")
     rate_spar_spar = compute_rates(fit_base, "SPAR_fit")
 
+    # Convert cap % ratios into WAR$ and SPAR$ market rows per position, falling back to ALL if not enough players exist in bucket
     market_rows = []
     for bucket in ["ALL", "F", "D"]:
         rate_spar_row_war = rate_spar_war[rate_spar_war["Bucket"] == bucket].iloc[0]
@@ -322,6 +332,7 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     stats_df = stats_df.merge(stats_small[["playerId","WAR_blend","SPAR_blend"]], on="playerId", how="left")
     stats_df["PriceBucket"] = stats_df["PosBucket"].where(stats_df["PosBucket"].isin(["F","D"]), "ALL")
 
+    # Apply pricing to each player row to get dollar values for each player
     def price_row(row):
         b = row["PriceBucket"]
         war_raw  = float(row["WAR_blend"])  if np.isfinite(row["WAR_blend"])  else 0.0
@@ -370,11 +381,11 @@ def build_market_and_values_for_season(contract_season, contracts_df, season_col
     player_out = out_folder / f"player_value_{contract_season}.csv"
     market_df.to_csv(market_out, index=False)
     player_value_df.to_csv(player_out, index=False)
-
     return market_df, player_value_df
 
 # Main
 def main():
+    # Read in contract master file and parse out contract set for given start year
     contracts_path = data_root / contracts_file
     contracts_df = pd.read_csv(contracts_path)
     season_col = "Start Year"
@@ -387,6 +398,7 @@ def main():
         except Exception:
             continue
 
+    # For each season, build market rate to estimate WAR$ and SPAR$
     for contract_season in seasons:
         build_market_and_values_for_season(contract_season, contracts_df, season_col)
 

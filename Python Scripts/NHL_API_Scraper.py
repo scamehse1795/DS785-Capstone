@@ -22,9 +22,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sklearn.linear_model import LogisticRegression
 
-# Config 
+# Config
 base_directory = Path(__file__).resolve().parent.parent
 output_root = base_directory / "Data" / "Clean Data"
+master_file = Path(output_root) / "NHL_PLAYERS_MASTER.csv"
 start_year = 2015
 end_year = 2025
 
@@ -91,6 +92,7 @@ def parse_date(raw_date):
         return None
     return timestamp.date().isoformat() 
 
+# Fetch demographic data for each playerID (name, height, weight, etc.)
 def fetch_player_bios(session, player_type, season_code, game_type_id=2, limit=page_limit):
     url = f"{stats_rest_base}/en/{player_type}/bios"
     all_rows = []
@@ -118,7 +120,6 @@ def fetch_player_bios(session, player_type, season_code, game_type_id=2, limit=p
     while True:
         params = dict(base_params)
         params["start"] = str(start)
-
         data = get_json(session, url, params=params)
         rows = data.get("data") or []
 
@@ -148,7 +149,6 @@ def fetch_player_bios(session, player_type, season_code, game_type_id=2, limit=p
 
 def collect_bios_for_season(session, season_code, game_type_id=2):
     frames = []
-
     skater_bios = fetch_player_bios(session, "skater", season_code, game_type_id=game_type_id)
     if not skater_bios.empty:
         frames.append(skater_bios)
@@ -161,13 +161,11 @@ def collect_bios_for_season(session, season_code, game_type_id=2):
         return pd.DataFrame(columns=["playerId"])
 
     bios = pd.concat(frames, ignore_index=True)
-
     if "playerId" not in bios.columns:
         return pd.DataFrame(columns=["playerId"])
 
     bios["playerId"] = pd.to_numeric(bios["playerId"], errors="coerce").astype("Int64")
     bios = bios.dropna(subset=["playerId"])
-
     demo_cols = [
         "skaterFullName", "goalieFullName",
         "currentTeamAbbrev", "positionCode", "shootsCatches",
@@ -180,9 +178,9 @@ def collect_bios_for_season(session, season_code, game_type_id=2):
     keep_cols = ["playerId"] + [c for c in demo_cols if c in bios.columns]
     keep_cols = list(dict.fromkeys(keep_cols))
     bios = bios[keep_cols].drop_duplicates(subset=["playerId"], keep="last")
-
     return bios
 
+# convert time to seconds
 def mmss_to_seconds(time):
     if time is None or (isinstance(time, float) and pd.isna(time)):
         return pd.NA
@@ -228,7 +226,7 @@ def ensure_teamgames_columns(df, season_folder_name):
     ordered = teamgames_required_columns + remaining_cols
     return out[ordered]
 
-# Parses through schedule data and builds team games list and data
+# Parses through schedule data and builds API end of TeamGames table
 def build_teamgames_from_schedules(session, season_code, season_folder_name):
     teams = list_teams(session)
     schedule_frames = []
@@ -290,7 +288,8 @@ def build_teamgames_from_schedules(session, season_code, season_folder_name):
             "Team": home_abbr,
             "Opponent": away_abbr,
             "teamId": home_id,
-            "Season": season_folder_name})
+            "Season": season_folder_name
+            })
         
         rows.append({
             "gameId": gameid,
@@ -299,7 +298,8 @@ def build_teamgames_from_schedules(session, season_code, season_folder_name):
             "Team": away_abbr,
             "Opponent": home_abbr,
             "teamId": away_id,
-            "Season": season_folder_name})
+            "Season": season_folder_name
+            })
 
     tg_map = pd.DataFrame(rows).drop_duplicates(subset=["gameId", "home_or_away", "Team"])
     tg_map["teamId"] = pd.to_numeric(tg_map["teamId"], errors="coerce").astype("Int64")
@@ -424,6 +424,7 @@ def sort_columns_readable(df):
     return df[front + rest]
 
 def normalize_goalie_summary(df, season_code):
+    # Normalize goalie stats so skater and goalie rows share a common schema (this is more future-planning for adding goalies to the pipeline in the future)
     g = df.copy()
     if "seasonId" not in g.columns:
         g["seasonId"] = season_code
@@ -440,7 +441,6 @@ def normalize_goalie_summary(df, season_code):
 
     g["positionCode"] = "G"
     g["isGoalie"] = True
-
     core = [
         "seasonId", "gameId", "gameDate", "playerId", "playerFullName",
         "teamAbbrev", "opponentTeamAbbrev", "positionCode", "isGoalie",
@@ -465,8 +465,6 @@ def left_join_unique(left, right, on_keys):
     return merged
 
 # Player Master helpers
-master_file = Path(output_root) / "NHL_PLAYERS_MASTER.csv"
-
 def pos_to_bucket(code):
     if not code:
         return None
@@ -477,6 +475,7 @@ def pos_to_bucket(code):
         return "F"
     return c
 
+# Build a cross-season player master file linking playerID to name, position, and bio data
 def build_players_from_frames(season_code, skaters_df, goalies_df):
     cols = ["playerId", "fullName", "positionCode", "PosBucket", "seasonId"]
     out_rows = []
@@ -572,10 +571,9 @@ def write_players_master_snapshot(players_df_list, bios_df_list=None, master_pat
     base_cols = ["playerId", "fullName", "positionCode", "PosBucket", "seasonId"]
     extra_cols = [c for c in players_df.columns if c not in base_cols]
     players_df = players_df.reindex(columns=base_cols + extra_cols)
-
     players_df.to_csv(master_path, index=False)
 
-# Main scraper
+# Main scraper for skater data
 def scrape_one_regular_season(start_year, out_root=output_root):
     season_code = format_season_code(start_year)
     season_folder = format_season_folder(start_year)
@@ -648,9 +646,7 @@ def load_skater_position_map(out_root, season_folder_name):
     if "playerId" not in pg.columns:
         return positions, skater_ids
     pid_col = "playerId"
-    
     pos_col = "positionCode" if "positionCode" in pg.columns else None
-
     pg["pid_tmp"] = pd.to_numeric(pg[pid_col], errors="coerce").astype("Int64")
     if pos_col is not None:
         pg["pos_tmp"] = pg[pos_col].astype(str).str.upper()
@@ -674,6 +670,7 @@ def load_skater_position_map(out_root, season_folder_name):
 
     return positions, skater_ids
 
+# Helpers contain a few different column possibilities because the schema in the API shifts occasionally
 def parse_situation_code(s, default_home=5, default_away=5):
     if s is None:
         return default_home, default_away
@@ -745,7 +742,6 @@ def infer_faceoff_winner_side(events_g, home_id, away_id):
 
     ev = events_g.sort_values(["period", "eventSec", "type"]).reset_index(drop=True)
     ev["fo_winner_side"] = pd.NA
-
     next_team_idx = [-1] * len(ev)
     last_with_team = -1
     for i in reversed(range(len(ev))):
@@ -904,7 +900,6 @@ def parse_pbp_events(game_id, pbp_json):
             return pd.NA
 
     df["eventTeamId"] = df.apply(fill_event_team_id, axis=1)
-
     home_str, away_str = [], []
     for s in df["strength"].tolist():
         h, a = parse_situation_code(s, 5, 5)
@@ -913,10 +908,8 @@ def parse_pbp_events(game_id, pbp_json):
     df["home_skaters"] = pd.to_numeric(home_str, errors="coerce")
     df["away_skaters"] = pd.to_numeric(away_str, errors="coerce")
     df["manpower_str"] = df["home_skaters"].astype("Int64").astype(str) + "v" + df["away_skaters"].astype("Int64").astype(str)
-
     df["pulled_home"] = (df["home_skaters"] >= 6)
     df["pulled_away"] = (df["away_skaters"] >= 6)
-
     df = df.sort_values(["period", "eventSec"], kind="mergesort").reset_index(drop=True)
 
     home_score = 0
@@ -977,6 +970,7 @@ def parse_pbp_events(game_id, pbp_json):
 
     return df
 
+# Initial cleaning step before wiritng to file (less work later)
 def normalize_shift_row(game_id, r, season_code):
     player_id = r.get("playerId")
     team_id = r.get("teamId")
@@ -1098,6 +1092,7 @@ def fetch_shiftcharts_for_game(session, game_id):
     return []
 
 # Basic xG model (Basic Logistic Regression: adheres to industry standard (source: https://evolving-hockey.com/glossary/general-terms/))
+# Uses situation, distance, shot angle, and rebound/rush context tags
 def xg_design_matrix(df):
     use = df.copy()
     use["PP"] = (use["strengthBucket"].astype(str).str.upper() == "PP").astype(int)
@@ -1205,7 +1200,7 @@ def attribute_xg_to_shifts(shifts_g, events_g):
 
     return shifts
 
-# Builder
+# Build timelines per game by period
 def build_onice_timelines(shifts_g, home_id, away_id, skater_positions=None, skater_ids=None):
     if shifts_g.empty:
         return {}
@@ -1271,6 +1266,7 @@ def build_onice_timelines(shifts_g, home_id, away_id, skater_positions=None, ska
         merged[p] = {"home": home_timelines.get(p, []), "away": away_timelines.get(p, [])}
     return merged
 
+# Add manpower and home/away skater numbers to every event line
 def annotate_events_with_onice(events_g, timelines, home_id, away_id):
     if events_g.empty:
         for c in ("home_skaters", "away_skaters", "manpower_str", "pulled_home", "pulled_away"):
@@ -1310,6 +1306,9 @@ def annotate_events_with_onice(events_g, timelines, home_id, away_id):
 
     return ev
 
+# Build/update TeamGames for this season
+# Pull skater/goalie stats and join together
+# Update player master with any new lines
 def scrape_shifts_one_regular_season(start_year, out_root=output_root):
     season_code = format_season_code(start_year)
     season_folder = format_season_folder(start_year)
@@ -1453,6 +1452,7 @@ def scrape_shifts_one_regular_season(start_year, out_root=output_root):
     sdir = Path(out_root) / season_folder
     sdir.mkdir(parents=True, exist_ok=True)
 
+    # Save events to csv files
     shifts_path = sdir / f"shifts_{season_folder}.csv"
     shifts_df.to_csv(shifts_path, index=False)
 
@@ -1465,6 +1465,7 @@ def scrape_shifts_one_regular_season(start_year, out_root=output_root):
 
 # Season Driver
 def scrape_regular_seasons_range(start_year, end_year, out_root=output_root):
+    # Loop through each regular season in range and scrape each, and write each season's player data to the master file
     results = {}
     all_players_this_run = []
     all_bios_this_run = []
@@ -1486,6 +1487,7 @@ def scrape_regular_seasons_range(start_year, end_year, out_root=output_root):
     return results
 
 def scrape_shifts_range(start_year, end_year, out_root=output_root):
+    # Loop through each regular season shifts/pbp events 
     results = {}
     for season_start in list_seasons(start_year, end_year):
         try:
@@ -1499,8 +1501,9 @@ def scrape_shifts_range(start_year, end_year, out_root=output_root):
 
 # Main
 def main():
+    # Scraping takes a while so I added these tags for debugging each part (especailly the shifts portion)
     run_api = True
-    run_shifts = False
+    run_shifts = True
     if run_api:
         scrape_regular_seasons_range(start_year, end_year)
         

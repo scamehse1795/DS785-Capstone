@@ -19,6 +19,7 @@ data_root = base_dir / "Data"
 raw_NST_root = data_root / "Raw Data" / "NaturalStatTrick" / "Games"
 clean_data_root = data_root / "Clean Data"
 
+# Templates for finding NST files withing a given situation folder
 es_counts_path_template = raw_NST_root / "Counts" / "Even Strength" / "NST Games Even Strength Counts {season}.csv"
 es_rates_path_template = raw_NST_root / "Rates" / "Even Strength" / "NST Games Even Strength Rates {season}.csv"
 pp_counts_path_template = raw_NST_root / "Counts" / "Power Play" / "NST Games Power Play Counts {season}.csv"
@@ -26,6 +27,7 @@ pp_rates_path_template = raw_NST_root / "Rates" / "Power Play" / "NST Games Powe
 pk_counts_path_template = raw_NST_root / "Counts" / "Penalty Kill" / "NST Games Penalty Kill Counts {season}.csv"
 pk_rates_path_template = raw_NST_root / "Rates" / "Penalty Kill" / "NST Games Penalty Kill Rates {season}.csv"
 
+# Tricode map and list of known tricodes that should appear in the 2015-present span (all current teams plus ARI, as they just moved to Utah)
 team_code_map = {
     "Anaheim Ducks":"ANA","Boston Bruins":"BOS","Buffalo Sabres":"BUF","Calgary Flames":"CGY",
     "Carolina Hurricanes":"CAR","Chicago Blackhawks":"CHI","Colorado Avalanche":"COL","Columbus Blue Jackets":"CBJ",
@@ -80,10 +82,13 @@ def mmss_to_seconds(time):
     parts = time_string.split(":")
     try:
         if len(parts) == 2:
-            m, sec = int(parts[0]), int(parts[1])
+            m = int(parts[0])
+            sec = int(parts[1])
             return m*60 + sec
         if len(parts) == 3:
-            h, m, sec = int(parts[0]), int(parts[1]), int(parts[2])
+            h = int(parts[0])
+            m = int(parts[1])
+            sec = int(parts[2])
             return h*3600 + m*60 + sec
     except Exception:
         return pd.NA
@@ -151,7 +156,7 @@ def build_schedule_wide(teamgames_csv):
     required_cols = ["gameId", "Team", "home_or_away", "gameDate"]
     missing = [c for c in required_cols if c not in teamgames_df.columns]
     if missing:
-        raise ValueError(f"ERROR: TeamGames missing required columns: {missing}")
+        raise ValueError(f"TeamGames missing required columns: {missing}")
 
     schedule_df = teamgames_df[["gameId", "Team", "home_or_away", "gameDate"]].copy()
     schedule_df.rename(columns={"Team": "TeamRaw", "home_or_away": "hoa"}, inplace=True)
@@ -205,9 +210,9 @@ def extract_nst_stats_for_situation(counts_path, rates_path, situation_label):
     rates_df = pd.read_csv(rates_path) if rates_exists else None
     game_col = "Game"
     team_col = "Team"
-    toi_col  = "TOI"
-    xgf_cnt  = "xGF"
-    xga_cnt  = "xGA"
+    toi_col = "TOI"
+    xgf_cnt = "xGF"
+    xga_cnt = "xGA"
     xgf60_rate = "xGF/60"
     xga60_rate = "xGA/60"
     if game_col is None or team_col is None:
@@ -284,11 +289,9 @@ def update_teamgames_with_mapping_and_stats(teamgames_path, season, matched_pair
             return pd.DataFrame()
         s = stats_df.copy()
         s["Team"] = s["Team"].map(to_tricode)
-
         s_home = s.merge(map_min, left_on=["Date", "Team"], right_on=["Date", "homeTeam"], how="inner")
         s_home["home_or_away"] = "home"
         s_home["OppStd"] = s_home["awayTeam"]
-
         s_away = s.merge(map_min, left_on=["Date", "Team"], right_on=["Date", "awayTeam"], how="inner")
         s_away["home_or_away"] = "away"
         s_away["OppStd"] = s_away["homeTeam"]
@@ -325,8 +328,7 @@ def update_teamgames_with_mapping_and_stats(teamgames_path, season, matched_pair
     key_cols = ["gameId", "home_or_away", "Team", "Situation"]
     merged = teamgames.merge(all_long, how="outer", on=key_cols, suffixes=("", "_new"))
 
-    fill_cols = ["gameDate", "TeamStd", "OppStd", "Opponent",
-                 "TOI_seconds", "xGF", "xGA", "xGF_per60", "xGA_per60", "Season", "teamId"]
+    fill_cols = ["gameDate", "TeamStd", "OppStd", "Opponent", "TOI_seconds", "xGF", "xGA", "xGF_per60", "xGA_per60", "Season", "teamId"]
     for c in fill_cols:
         c_new = c + "_new"
         if c in merged.columns and c_new in merged.columns:
@@ -334,26 +336,24 @@ def update_teamgames_with_mapping_and_stats(teamgames_path, season, matched_pair
             merged.drop(columns=[c_new], inplace=True, errors="ignore")
 
     baseline_mask = merged["Situation"].isna()
-    situation_keys = (
-        merged.loc[~merged["Situation"].isna(), ["gameId", "home_or_away", "Team"]]
-        .drop_duplicates()
-        .assign(_has_sit=True))
+    situation_keys = (merged.loc[~merged["Situation"].isna(), ["gameId", "home_or_away", "Team"]].drop_duplicates().assign(_has_sit=True))
     merged = merged.merge(situation_keys, how="left", on=["gameId", "home_or_away", "Team"])
     drop_mask = baseline_mask & merged["_has_sit"].fillna(False)
     merged = merged.loc[~drop_mask].drop(columns=["_has_sit"])
-
     merged = ensure_teamgames_columns(merged, season)
     numeric_cols = ["TOI_seconds", "xGF", "xGA", "xGF_per60", "xGA_per60"]
     merged = coerce_numeric_cols(merged, numeric_cols)
-
     merged.to_csv(tg_path, index=False)
     return merged
 
 # Main Driver
 def process_season(year):
+    # Locate NST files for given season
+    # Construct TeamGame schedule with one row per gameID
+    # Match NST data to specific game using home/away pair and date
     season = season_label(year)
     print(f"Mapping NST/API for {season}")
-
+    
     nst_counts_path = Path(str(es_counts_path_template).format(season=season))
     nst_pairs = parse_nst_games_grouped(nst_counts_path)
     tg_dir = clean_data_root / season
@@ -372,13 +372,13 @@ def process_season(year):
     es_stats = extract_nst_stats_for_situation(es_counts, es_rates, "Even Strength")
     pp_stats = extract_nst_stats_for_situation(pp_counts, pp_rates, "Power Play")
     pk_stats = extract_nst_stats_for_situation(pk_counts, pk_rates, "Penalty Kill")
+    
+    # Update TeamGames with NST data
     updated_tg = update_teamgames_with_mapping_and_stats(str(tg_file), season, matched, es_stats, pp_stats, pk_stats)
-
     miss_dir = tg_dir / "missing logs"
     miss_dir.mkdir(parents=True, exist_ok=True)
     out_unmatched_path = miss_dir / f"unmatched_nst_{season}.csv"
     unmatched[["Date","pair_key"]].drop_duplicates().to_csv(out_unmatched_path, index=False)
-
     print(f"Updated {updated_tg.shape[0]} TeamGames rows")
 
 def main():
